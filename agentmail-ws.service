@@ -1,0 +1,28 @@
+[Unit]
+Description=AgentMail WebSocket Daemon — real-time email events + Telegram notification
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.agentmail/agentmail_ws.py --inbox YOUR_INBOX_EMAIL
+Restart=always
+RestartSec=5
+Environment=AGENTMAIL_API_KEY=YOUR_AGENTMAIL_API_KEY
+Environment=AGENTMAIL_EVENTS_DIR=%h/.agentmail/events
+Environment=AGENTMAIL_STATE_FILE=%h/.agentmail/state.json
+EnvironmentFile=%h/.agentmail/.env
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.agentmail/events %h/.agentmail/state.json
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentmail-ws
+
+[Install]
+WantedBy=default.target
