@@ -164,6 +164,15 @@ agentmail-approval-inbox/
 - **Telegram callback authorization.** The handler verifies the button-tapper is an authorized user before processing.
 - **Minimal data over Telegram.** Only sender, subject, preview, and classification are sent — never the full email body.
 - **Local-first storage.** Email content is only stored locally in `~/.agentmail/events/.processed/`.
+- **Callback TTL.** Pending actions (short keys for Telegram callbacks) expire after 48 hours. Stale entries are purged automatically on each processor run.
+- **Set restrictive file permissions on event storage directories.** Example for Hermes-integrated deployments:
+
+```bash
+chmod 700 ~/.hermes/agentmail_events
+chmod 600 ~/.hermes/agentmail_seen_threads.json
+```
+
+Default paths use `~/.agentmail/` — adjust to match your actual deployment.
 
 ## AgentMail MCP Configuration (Hermes Agent)
 

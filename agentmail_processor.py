@@ -16,6 +16,7 @@ Environment:
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -191,9 +192,39 @@ def _store_action(thread_id: str, message_id: str) -> str:
     # Find next numeric key
     next_id = max((int(k[1:]) for k in store if k.startswith("n")), default=0) + 1
     key = f"n{next_id}"
-    store[key] = {"thread_id": thread_id, "message_id": message_id}
+    store[key] = {"thread_id": thread_id, "message_id": message_id, "created_at": time.time()}
     _save_pending(store)
     return key
+
+
+# ---------------------------------------------------------------------------
+# Callback TTL — expire stale entries older than 48 hours
+# ---------------------------------------------------------------------------
+CALLBACK_TTL_SECONDS = 48 * 60 * 60  # 48 hours
+
+
+def cleanup_expired_actions() -> int:
+    """Remove pending action entries older than CALLBACK_TTL_SECONDS.
+
+    Returns the number of entries removed.
+    """
+    store = _load_pending()
+    if not store:
+        return 0
+
+    now = time.time()
+    expired_keys = [
+        k for k, v in store.items()
+        if isinstance(v, dict) and (now - v.get("created_at", now)) > CALLBACK_TTL_SECONDS
+    ]
+
+    for k in expired_keys:
+        del store[k]
+
+    if expired_keys:
+        _save_pending(store)
+
+    return len(expired_keys)
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +312,11 @@ tags: [email, {c['classification']}]
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    # Expire stale callback entries before processing any new events
+    removed = cleanup_expired_actions()
+    if removed:
+        print(f"CLEANUP: expired {removed} stale callback(s) from pending_actions.json")
+
     if len(sys.argv) < 2:
         print("Usage: agentmail_processor.py <event_file.json>", file=sys.stderr)
         sys.exit(1)
