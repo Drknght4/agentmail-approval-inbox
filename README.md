@@ -151,6 +151,8 @@ agentmail-approval-inbox/
 ├── agentmail-ws.service       # systemd user service file
 ├── agentmail-approval/
 │   └── SKILL.md               # Hermes Agent skill definition
+├── tests/
+│   └── test_security.py       # 89 unit tests — injection, escaping, attachment safety
 ├── .env.example               # Environment variable template
 ├── README.md                  # This file
 ├── SECURITY.md                # Trust boundaries, sanitization flow, injection risks
@@ -167,7 +169,8 @@ agentmail-approval-inbox/
 - **Local-first storage.** Email content is only stored locally in `~/.agentmail/events/.processed/`.
 - **Callback TTL.** Pending actions (short keys for Telegram callbacks) expire after 48 hours. Stale entries are purged automatically on each processor run.
 - **Input sanitization.** All email-derived content (subjects, previews, sender fields) passes through a sanitization pipeline before reaching Telegram, Obsidian vault, or LLM context. See [SECURITY.md](SECURITY.md) for the full trust boundary model and sanitization flow.
-- **Prompt injection defense.** Email content is treated as untrusted input — trust boundary markers wrap all email data before it enters LLM context. See [SECURITY.md](SECURITY.md).
+- **Prompt injection defense.** All email-derived content is sanitized before reaching any LLM or output system. See [SECURITY.md](SECURITY.md) for the full trust boundary architecture.
+- **89 unit tests** cover injection scenarios, attachment safety, and output escaping.
 - **Set restrictive file permissions on event storage directories.** Example for Hermes-integrated deployments:
 
 ```bash
