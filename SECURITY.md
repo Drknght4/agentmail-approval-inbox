@@ -59,13 +59,13 @@ Zero-width characters, BOM, soft hyphens, and directional controls can alter how
 ### HTML/Script Injection (HIGH without sanitization)
 Email subjects and previews can contain `<script>`, `<iframe>`, or `<style>` tags, or markdown links `[text](https://evil.com/tracker)`.
 
-**Mitigation:** `_strip_html_and_scripts()` removes dangerous tags first, then strips all remaining HTML. `_strip_markdown_links()` preserves visible text while removing URLs. `_strip_tracking_params()` removes UTM/fbclid/gclid parameters.
+**Mitigation:** `_strip_html_and_scripts()` removes dangerous elements **including their content** (script bodies, CSS rules, iframe content), then strips void tags (`<input>`, `<meta>`), then strips all remaining HTML tags preserving inner text. `_strip_markdown_links()` preserves visible text while removing URLs. `_strip_tracking_params()` removes UTM/fbclid/gclid parameters.
 
 ## Sanitization Pipeline
 
 `sanitize_email_content(text, field_name="")` applies these stages in order:
 
-1. **Strip HTML and scripts** — removes `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<applet>`, `<form>`, `<input>`, `<textarea>`, `<button>`, `<link>`, `<meta>`, `<base>` tags entirely, then strips all remaining HTML tags
+1. **Strip HTML elements and scripts** — removes `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<applet>`, `<form>`, `<head>` elements **including their content** entirely (not just the tags), then strips void tags (`<input>`, `<meta>`, etc.), then strips all remaining HTML tags preserving inner text
 2. **Strip control characters** — removes zero-width chars, BOM, directional overrides, C0 controls (except TAB/LF/CR), soft hyphens
 3. **Strip markdown links** — converts `[text](url)` to `text`, removes `![alt](url)` entirely
 4. **Strip tracking parameters** — removes `utm_*`, `fbclid`, `gclid`, `mc_eid`, `mc_cid`, `yclid`, `_openstat`, `pk_*` from URLs
@@ -127,9 +127,50 @@ The only paths from email reception to action:
 
 No other paths exist. There is **no autonomous execution path** — the LLM only engages when the user explicitly taps a Telegram inline button.
 
+## Attachment Safety
+
+### `inspect_attachment(filename, declared_mime_type, file_size)`
+
+Validates email attachments before any content reaches the LLM or notification pipeline. Returns a metadata-only dict — **never passes raw attachment content** to the caller.
+
+**Extension blocklist** — blocked regardless of declared MIME type:
+`.exe`, `.bat`, `.cmd`, `.com`, `.scr`, `.pif`, `.msi`, `.msp`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`, `.wsh`, `.ps1`, `.psm1`, `.sh`, `.bash`, `.zsh`, `.fish`, `.py`, `.pyc`, `.pyo`, `.rb`, `.pl`, `.pm`, `.t`, `.dll`, `.so`, `.dylib`, `.sys`, `.drv`, `.reg`, `.inf`, `.cat`, `.hta`, `.html`, `.htm`, `.xhtml`, `.ws`, `.wsdl`, `.cpl`, `.msc`, `.lnk`, `.url`, `.iso`, `.img`, `.vhd`, `.vmdk`
+
+**MIME type allowlist** — only approved MIME types pass through:
+- Documents: PDF, plain text, CSV, Markdown, RTF
+- Images: JPEG, PNG, GIF, WebP, SVG, TIFF
+- Audio/Video: MP3, OGG, WAV, MP4, WebM
+- Archives: ZIP, GZIP, TAR (content not extracted — noted as present)
+- Office: XLSX, XLS, DOCX, DOC, PPTX, PPT
+
+**Quarantine flow:**
+1. Blocked attachment → logged to `~/.agentmail/quarantine/` (chmod 700)
+2. Log entry contains filename, reason, declared MIME type, file size, timestamp
+3. **Raw attachment content is NEVER written to the quarantine directory** — only metadata
+4. Returns `{"safe": False, "reason": "...", "quarantine_path": "..."}` to caller
+
+**MIME mismatch handling:**
+- Extension blocklist is checked FIRST — a `.exe` claiming to be `application/pdf` is still blocked
+- MIME allowlist is checked SECOND — an unknown extension with unapproved MIME type is blocked
+- No MIME type declared → only extension blocklist applies (extension passes if not blocked)
+
+### Design: Metadata-Only Return
+
+```python
+result = inspect_attachment("report.pdf", "application/pdf", 102400)
+# result = {"safe": True, "filename": "report.pdf", "mime_type": "application/pdf",
+#           "file_size": 102400, "reason": "", "quarantine_path": None}
+
+result = inspect_attachment("malware.exe", "application/octet-stream", 4096)
+# result = {"safe": False, "filename": "malware.exe", "mime_type": "application/octet-stream",
+#           "file_size": 4096, "reason": "blocked extension: .exe",
+#           "quarantine_path": "/home/user/.agentmail/quarantine/20260527T120000_malware_exe.json"}
+```
+
 ## Design Principles
 
 - **Fail-closed:** Sanitization errors raise exceptions; processing halts rather than delivering unsanitized content
-- **Allowlists over blocklists:** Filenames use allowlist (`[a-zA-Z0-9 -_]`). Control character removal uses an explicit set of known-bad ranges rather than trying to enumerate all Unicode categories
-- **Defense in depth:** Content is sanitized at the trust boundary entry point (classify_email) AND escaped at each output point (Telegram, Obsidian, JSON, LLM prompts)
+- **Allowlists over blocklists:** Filenames use allowlist (`[a-zA-Z0-9 -_.]` with `..` collapse). MIME types use allowlist. Extensions use blocklist as secondary defense. Control character removal uses an explicit set of known-bad ranges.
+- **Defense in depth:** Content is sanitized at the trust boundary entry point (classify_email) AND escaped at each output point (Telegram, Obsidian, JSON, LLM prompts). Attachments are validated at MIME + extension level.
 - **No autonomous execution:** The LLM engages only on explicit user action (button tap). Classification and notification are pure rule-based with no AI
+- **Metadata-only attachments:** `inspect_attachment()` returns safe metadata only — raw file content never enters the pipeline

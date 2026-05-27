@@ -65,8 +65,24 @@ _CONTROL_CHAR_RE = re.compile(
     "]"
 )
 
-# HTML/script tags — stripped entirely
-_HTML_TAG_RE = re.compile(r"<\s*/?\s*(?:script|style|iframe|object|embed|applet|form|input|textarea|button|link|meta|base)\b[^>]*>", re.IGNORECASE | re.DOTALL)
+# HTML/script elements — stripped ENTIRELY including their content.
+# These elements carry no meaningful visible text; their content is
+# executable/styling code that must be removed, not preserved.
+# We use explicit patterns for each tag to avoid backreference complexity.
+_HTML_SCRIPT_RE = re.compile(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_STYLE_RE = re.compile(r"<\s*style\b[^>]*>.*?<\s*/\s*style\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_IFRAME_RE = re.compile(r"<\s*iframe\b[^>]*>.*?<\s*/\s*iframe\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_OBJECT_RE = re.compile(r"<\s*object\b[^>]*>.*?<\s*/\s*object\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_EMBED_RE = re.compile(r"<\s*embed\b[^>]*>.*?<\s*/\s*embed\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_APPLET_RE = re.compile(r"<\s*applet\b[^>]*>.*?<\s*/\s*applet\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_FORM_RE = re.compile(r"<\s*form\b[^>]*>.*?<\s*/\s*form\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_HEAD_RE = re.compile(r"<\s*head\b[^>]*>.*?<\s*/\s*head\s*>", re.IGNORECASE | re.DOTALL)
+
+# Self-closing or void dangerous tags — stripped (tag only, no content)
+_HTML_VOID_TAG_RE = re.compile(
+    r"<\s*/?\s*(?:input|textarea|button|link|meta|base|img|br|hr)\b[^>]*/?\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 # Remaining HTML tags — convert to content-preserving plaintext
 _HTML_GENERAL_RE = re.compile(r"<[^>]+>")
@@ -85,9 +101,23 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _strip_html_and_scripts(text: str) -> str:
-    """Remove dangerous HTML tags (script, style, iframe, etc.), then strip all
-    remaining HTML tags, preserving inner text where meaningful."""
-    text = _HTML_TAG_RE.sub("", text)
+    """Remove dangerous HTML elements and their content entirely (script,
+    style, iframe, etc.), then strip all remaining HTML tags, preserving
+    inner text where meaningful.
+
+    This is a two-pass approach:
+    1. Remove entire elements with their content (script, style, iframe, ...)
+    2. Remove void/dangerous tags (input, meta, link, ...)
+    3. Strip all remaining HTML tags, preserving inner text
+    """
+    # Pass 1: Remove entire elements with their content
+    for pattern in (_HTML_SCRIPT_RE, _HTML_STYLE_RE, _HTML_IFRAME_RE,
+                    _HTML_OBJECT_RE, _HTML_EMBED_RE, _HTML_APPLET_RE,
+                    _HTML_FORM_RE, _HTML_HEAD_RE):
+        text = pattern.sub("", text)
+    # Pass 2: Remove void/dangerous tags
+    text = _HTML_VOID_TAG_RE.sub("", text)
+    # Pass 3: Strip remaining HTML tags, preserving inner text
     text = _HTML_GENERAL_RE.sub("", text)
     return text
 
@@ -197,11 +227,17 @@ def escape_for_markdown_yaml(text: str) -> str:
 def escape_for_filename(text: str) -> str:
     """Allowlist-based filename character escaping.
 
-    Only allows alphanumeric, spaces, hyphens, and underscores.
-    Everything else becomes underscore. This is an ALLOWLIST approach —
-    we specify what's safe, not what's dangerous.
+    Only allows alphanumeric, spaces, hyphens, underscores, and dots
+    (for file extensions). Everything else becomes underscore. This is
+    an ALLOWLIST approach — we specify what's safe, not what's dangerous.
+
+    Additionally collapses '..' to '_' to prevent path traversal.
     """
-    return "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in text).strip()
+    result = "".join(ch if ch.isalnum() or ch in " -_." else "_" for ch in text).strip()
+    # Collapse '..' to prevent path traversal (e.g., '../../../etc/passwd')
+    while ".." in result:
+        result = result.replace("..", "_")
+    return result
 
 
 # ===========================================================================
@@ -254,6 +290,193 @@ def build_secure_prompt(label: str, content: str, context: str = "") -> str:
     parts.append(TRUST_BOUNDARY_FOOTER)
 
     return "\n".join(parts)
+
+
+# ===========================================================================
+# ATTACHMENT SAFETY — validates and quarantines dangerous attachments
+# ===========================================================================
+
+# Allowlisted MIME types — only these may pass through to notification or LLM.
+# Extensions not in this list are blocked regardless of MIME type.
+ALLOWED_MIME_TYPES: frozenset[str] = frozenset({
+    # Documents
+    "application/pdf",
+    "text/plain",
+    "text/csv",
+    "text/markdown",
+    "application/rtf",
+    # Images
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/svg+xml",
+    "image/tiff",
+    # Audio/Video
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "video/mp4",
+    "video/webm",
+    # Archives (content is NOT extracted — just noted as present)
+    "application/zip",
+    "application/gzip",
+    "application/x-tar",
+    # Spreadsheets/Presentations
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+    "application/vnd.ms-word",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
+    "application/vnd.ms-powerpoint",
+})
+
+# BLOCKED_EXTENSIONS — denylist of dangerous file extensions.
+# Any attachment with one of these extensions is quarantined regardless of
+# declared MIME type. This is a secondary defense — the allowlist is primary.
+BLOCKED_EXTENSIONS: frozenset[str] = frozenset({
+    ".exe", ".bat", ".cmd", ".com", ".scr", ".pif", ".msi", ".msp",
+    ".js", ".jse", ".vbs", ".vbe", ".wsf", ".wsh", ".ps1", ".psm1",
+    ".sh", ".bash", ".zsh", ".fish",
+    ".py", ".pyc", ".pyo", ".rb", ".pl", ".pm", ".t",
+    ".dll", ".so", ".dylib", ".sys", ".drv",
+    ".reg", ".inf", ".cat",
+    ".hta", ".html", ".htm", ".xhtml",  # HTML can carry scripts
+    ".ws", ".wsdl",
+    ".cpl", ".msc",
+    ".lnk", ".url",  # shortcuts can launch arbitrary commands
+    ".iso", ".img", ".vhd", ".vmdk",  # disk images
+})
+
+# Directory for quarantined (blocked) attachments
+QUARANTINE_DIR = Path(os.environ.get(
+    "AGENTMAIL_QUARANTINE_DIR",
+    os.path.expanduser("~/.agentmail/quarantine"),
+))
+
+
+class AttachmentBlockedError(Exception):
+    """Raised when an attachment fails safety inspection."""
+    def __init__(self, filename: str, reason: str):
+        self.filename = filename
+        self.reason = reason
+        super().__init__(f"Attachment blocked: {filename} — {reason}")
+
+
+def inspect_attachment(
+    filename: str,
+    declared_mime_type: str = "",
+    file_size: int = 0,
+) -> dict:
+    """Inspect an email attachment for safety.
+
+    Validates MIME type against an allowlist and blocks dangerous extensions.
+    Blocked attachments are logged and quarantined. This function NEVER passes
+    raw attachment content to the caller — it returns only safe metadata.
+
+    Args:
+        filename: The attachment filename (e.g. "report.pdf").
+        declared_mime_type: MIME type from the email headers (e.g. "application/pdf").
+        file_size: Size in bytes of the attachment.
+
+    Returns:
+        dict with keys:
+            - safe (bool): Whether the attachment passed inspection.
+            - filename (str): Sanitized filename.
+            - mime_type (str): Validated MIME type (or empty string).
+            - file_size (int): Original size in bytes.
+            - reason (str): Reason for blocking, or empty string if safe.
+            - quarantine_path (str|None): Path where blocked file was logged, or None.
+
+    Raises:
+        ValueError: If filename is empty.
+    """
+    if not filename or not isinstance(filename, str):
+        raise ValueError("inspect_attachment: filename must be a non-empty string")
+
+    # Sanitize filename for safe display
+    safe_filename = sanitize_email_content(filename, field_name="attachment_filename")
+
+    # Check extension against blocked list (case-insensitive)
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in BLOCKED_EXTENSIONS:
+        reason = f"blocked extension: {ext}"
+        quarantine_path = _quarantine_log(safe_filename, reason, declared_mime_type, file_size)
+        return {
+            "safe": False,
+            "filename": safe_filename,
+            "mime_type": declared_mime_type,
+            "file_size": file_size,
+            "reason": reason,
+            "quarantine_path": quarantine_path,
+        }
+
+    # Check MIME type against allowlist (if declared)
+    if declared_mime_type:
+        normalized_mime = declared_mime_type.lower().split(";")[0].strip()
+        if normalized_mime not in ALLOWED_MIME_TYPES:
+            reason = f"unapproved MIME type: {normalized_mime}"
+            quarantine_path = _quarantine_log(safe_filename, reason, declared_mime_type, file_size)
+            return {
+                "safe": False,
+                "filename": safe_filename,
+                "mime_type": declared_mime_type,
+                "file_size": file_size,
+                "reason": reason,
+                "quarantine_path": quarantine_path,
+            }
+
+    # MIME type is approved (or empty — allow for cases where MIME is unknown,
+    # as long as the extension passed the blocklist check)
+    return {
+        "safe": True,
+        "filename": safe_filename,
+        "mime_type": declared_mime_type,
+        "file_size": file_size,
+        "reason": "",
+        "quarantine_path": None,
+    }
+
+
+def _quarantine_log(
+    filename: str,
+    reason: str,
+    declared_mime_type: str,
+    file_size: int,
+) -> str:
+    """Log a blocked attachment to the quarantine directory.
+
+    Creates the quarantine directory with chmod 700 on first use.
+    Writes a JSON log entry with metadata. Does NOT write the actual
+    attachment content — only records what was blocked and why.
+
+    Returns the path to the quarantine log entry.
+    """
+    QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    # Enforce restrictive permissions (chmod 700)
+    QUARANTINE_DIR.chmod(0o700)
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    log_filename = f"{ts}_{escape_for_filename(filename)}.json"
+    log_path = QUARANTINE_DIR / log_filename
+
+    entry = {
+        "timestamp": ts,
+        "filename": filename,
+        "reason": reason,
+        "declared_mime_type": declared_mime_type,
+        "file_size": file_size,
+        "action": "quarantined",
+    }
+
+    try:
+        log_path.write_text(json.dumps(entry, indent=2))
+        print(f"QUARANTINE: {filename} — {reason} (logged to {log_path})")
+    except Exception as e:
+        print(f"ERROR writing quarantine log: {e}", file=sys.stderr)
+        return str(QUARANTINE_DIR)
+
+    return str(log_path)
 
 
 # ---------------------------------------------------------------------------
