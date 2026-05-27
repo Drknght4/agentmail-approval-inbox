@@ -208,15 +208,22 @@ class AgentMailWS:
             self.seen_ids.add(msg_id)
             save_seen_ids(self.seen_ids)
 
+            # --- TRUST BOUNDARY: raw email content enters the system here ---
+            # All fields derived from event.message (from_, subject, preview, etc.)
+            # are UNTRUSTED EXTERNAL INPUT. They have NOT been sanitized yet.
+            # Sanitization happens in agentmail_processor.py::classify_email().
+            # The event_data dict passed to the processor is the sole trust
+            # boundary crossing point — downstream, sanitize_email_content()
+            # must be applied before this data touches any output or LLM context.
             event_data = {
                 "event_type": "message_received",
                 "received_at": datetime.now(timezone.utc).isoformat(),
                 "inbox_id": self.inbox_ids[0] if self.inbox_ids else DEFAULT_INBOX_ID,
                 "message_id": msg_id,
                 "thread_id": getattr(event.message, "thread_id", ""),
-                "from_": getattr(event.message, "from_", ""),
-                "subject": getattr(event.message, "subject", ""),
-                "preview": getattr(event.message, "preview", ""),
+                "from_": getattr(event.message, "from_", ""),      # UNSANITIZED email content
+                "subject": getattr(event.message, "subject", ""),  # UNSANITIZED email content
+                "preview": getattr(event.message, "preview", ""),  # UNSANITIZED email content
                 "to": getattr(event.message, "to", []),
                 "cc": getattr(event.message, "cc", []),
                 "bcc": getattr(event.message, "bcc", []),
@@ -224,12 +231,16 @@ class AgentMailWS:
                 "has_attachments": getattr(event.message, "has_attachments", False),
                 "created_at": str(getattr(event.message, "created_at", "")),
             }
+            # --- END TRUST BOUNDARY ---
 
             from_addr = event_data.get("from_", "")
             subject = event_data.get("subject", "(no subject)")
             log.info("New email from %s: %s", from_addr, subject)
 
-            # Write event and call processor (subprocess, no LLM)
+            # TRUST BOUNDARY: from_addr and subject logged here are UNSANITIZED.
+            # The log line below uses them only for local journal output (not
+            # Telegram, not LLM, not user-facing). The processor subprocess
+            # applies sanitize_email_content() before any external output.
             write_and_process(event_data)
 
             save_state("ws_last_event", datetime.now(timezone.utc).isoformat())

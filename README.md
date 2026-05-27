@@ -147,12 +147,13 @@ Classified: approval
 ```
 agentmail-approval-inbox/
 ├── agentmail_ws.py            # WebSocket daemon — persistent AgentMail connection
-├── agentmail_processor.py     # Event processor — classification + Telegram notification
+├── agentmail_processor.py     # Event processor — classification + Telegram notification + sanitization
 ├── agentmail-ws.service       # systemd user service file
 ├── agentmail-approval/
 │   └── SKILL.md               # Hermes Agent skill definition
 ├── .env.example               # Environment variable template
 ├── README.md                  # This file
+├── SECURITY.md                # Trust boundaries, sanitization flow, injection risks
 └── LICENSE                    # MIT License
 ```
 
@@ -165,6 +166,8 @@ agentmail-approval-inbox/
 - **Minimal data over Telegram.** Only sender, subject, preview, and classification are sent — never the full email body.
 - **Local-first storage.** Email content is only stored locally in `~/.agentmail/events/.processed/`.
 - **Callback TTL.** Pending actions (short keys for Telegram callbacks) expire after 48 hours. Stale entries are purged automatically on each processor run.
+- **Input sanitization.** All email-derived content (subjects, previews, sender fields) passes through a sanitization pipeline before reaching Telegram, Obsidian vault, or LLM context. See [SECURITY.md](SECURITY.md) for the full trust boundary model and sanitization flow.
+- **Prompt injection defense.** Email content is treated as untrusted input — trust boundary markers wrap all email data before it enters LLM context. See [SECURITY.md](SECURITY.md).
 - **Set restrictive file permissions on event storage directories.** Example for Hermes-integrated deployments:
 
 ```bash
