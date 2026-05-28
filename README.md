@@ -21,7 +21,7 @@ agentmail_processor.py   ← subprocess, ZERO LLM
   │   Sends Telegram notification via Bot API (inline buttons)
   │   Moves event to .processed/
   ↑
-User taps: ✅ Reply | 🗑️ Ignore | 📝 Save
+User taps: ✅ Reply | 🗑️ Ignore | 📝 Save to Vault
   ↓ callback_data: am:<action>:<short_key>
   ↓
 Hermes Agent (LLM)       ← only now, only on Reply/Save
@@ -35,7 +35,7 @@ Hermes Agent (LLM)       ← only now, only on Reply/Save
 - **Zero LLM cost for notifications** — classification and Telegram delivery use pure Python
 - **Instant delivery** — WebSocket push, not polling
 - **Human-in-the-loop** — no auto-replies, ever
-- **Three actions per email**: Reply, Ignore, Save
+- **Three actions per email**: Reply, Ignore, Save to Vault
 
 ## Classification Heuristics
 
@@ -139,8 +139,16 @@ From: Finance Team
 Subject: Q3 Budget Review 📎
 Preview: Please review the attached spreadsheet and approve...
 Classified: approval
-[✅ Reply]  [🗑️ Ignore]  [📝 Save]
+[✅ Reply]  [🗑️ Ignore]  [📝 Save to Vault]
 ```
+
+## What Each Button Does
+
+| Button | What happens | LLM involved? |
+|--------|-------------|---------------|
+| ✅ Reply | Hermes Agent reads the thread and drafts a reply for your review | Yes — only on tap |
+| 📝 Save to Vault | Hermes Agent saves the email as a structured note in your Obsidian vault | Yes — only on tap |
+| 🗑️ Ignore | Marks the email as processed. Nothing else happens. | No — zero cost |
 
 ## Project Structure
 

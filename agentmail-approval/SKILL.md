@@ -30,7 +30,7 @@ agentmail_processor.py (subprocess, no LLM)
   ↓ Sends Telegram notification via Bot API directly
   ↓ Moves event to .processed/
   ↑
-User taps inline button on Telegram notification: 🔵 Reply / 🗑️ Ignore / 📝 Save
+User taps inline button on Telegram notification: ✅ Reply / 🗑️ Ignore / 📝 Save to Vault
   (callback_data format: am:<action>:<short_key>, resolved via pending_actions.json)
   ↓
 Hermes Agent (this skill, LLM engaged only on user reply)
@@ -46,7 +46,7 @@ python3 agentmail_processor.py --dry-run
 ```
 If nothing, tell the user the inbox is clear. Real-time notifications are handled automatically by the WebSocket daemon + processor pipeline.
 
-### When the user taps an inline button (🔵 Reply / 🗑️ Ignore / 📝 Save)
+### When the user taps an inline button (✅ Reply / 🗑️ Ignore / 📝 Save to Vault)
 
 The Telegram gateway resolves the short callback key (e.g., `am:reply:n1`) via `~/.agentmail/events/pending_actions.json` and injects a synthetic message into the agent session with `auto_skill="agentmail-approval"`.
 

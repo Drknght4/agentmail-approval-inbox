@@ -726,7 +726,7 @@ def format_notification(c: dict) -> tuple[str, dict]:
         "inline_keyboard": [[
             {"text": "✅ Reply", "callback_data": f"am:reply:{key}"},
             {"text": "🗑️ Ignore", "callback_data": f"am:ignore:{key}"},
-            {"text": "📝 Save", "callback_data": f"am:save:{key}"},
+            {"text": "📝 Save to Vault", "callback_data": f"am:save:{key}"},
         ]]
     }
 
