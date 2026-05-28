@@ -775,8 +775,9 @@ def _store_action(thread_id: str, message_id: str, from_address: str = "") -> st
     to bind the callback to a specific request and detect replay or tampering.
     """
     store = _load_pending()
-    # Find next numeric key
-    next_id = max((int(k[1:]) for k in store if k.startswith("n")), default=0) + 1
+    # Find next numeric key — only parse keys matching n<digits>
+    numeric_ids = [int(k[1:]) for k in store if k.startswith("n") and k[1:].isdigit()]
+    next_id = max(numeric_ids, default=0) + 1
     key = f"n{next_id}"
     created_at = time.time()
     # Request hash: binds this callback to the specific thread/message/sender/time
