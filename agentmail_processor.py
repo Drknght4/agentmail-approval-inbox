@@ -29,6 +29,12 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -46,9 +52,138 @@ PENDING_ACTIONS_FILE = Path(os.environ.get(
     os.path.expanduser("~/.agentmail/events"),
 )) / "pending_actions.json"
 
+# Trust config path — lives next to this script by default
+TRUST_CONFIG_PATH = Path(os.environ.get(
+    "AGENTMAIL_TRUST_CONFIG",
+    str(Path(__file__).resolve().parent / "trust_config.yaml"),
+))
+
 
 # ===========================================================================
-# SANITIZATION PIPELINE — treats ALL email content as untrusted
+# SENDER TRUST LEVELS — allowlisted/known/unknown/suspicious classification
+# ===========================================================================
+
+# Trust level emoji mapping
+_TRUST_EMOJI = {
+    "allowlisted": "🟢",
+    "known": "🔵",
+    "unknown": "⚪",
+    "suspicious": "🔴",
+}
+
+# Module-level cache for trust config
+_trust_config_cache: dict | None = None
+
+
+def load_trust_config() -> dict:
+    """Load trust_config.yaml from the repo directory.
+
+    Falls back gracefully if the file is missing or unreadable:
+    returns an empty config that causes all senders to default to
+    'unknown' — safe-by-default.
+    """
+    global _trust_config_cache
+
+    if _trust_config_cache is not None:
+        return _trust_config_cache
+
+    config_path = Path(TRUST_CONFIG_PATH)
+
+    if not config_path.exists():
+        print(f"TRUST_CONFIG: not found at {config_path}, defaulting all senders to 'unknown'")
+        _trust_config_cache = {}
+        return _trust_config_cache
+
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except Exception as e:
+        print(f"TRUST_CONFIG: failed to read {config_path}: {e}", file=sys.stderr)
+        _trust_config_cache = {}
+        return _trust_config_cache
+
+    if _YAML_AVAILABLE:
+        import yaml as _yaml  # re-import under local name to satisfy type checkers
+        try:
+            data = _yaml.safe_load(raw) or {}
+            _trust_config_cache = data
+        except _yaml.YAMLError as e:
+            print(f"TRUST_CONFIG: failed to parse YAML {config_path}: {e}", file=sys.stderr)
+            _trust_config_cache = {}
+    else:
+        # Minimal fallback: try JSON (won't work for YAML with comments/anchors,
+        # but handles simple configs). If that fails, default to empty.
+        try:
+            _trust_config_cache = json.loads(raw)
+        except json.JSONDecodeError:
+            print("TRUST_CONFIG: yaml package not installed and config is not valid JSON; "
+                  "defaulting all senders to 'unknown'", file=sys.stderr)
+            _trust_config_cache = {}
+
+    return _trust_config_cache
+
+
+def get_sender_trust_level(from_address: str, subject: str = "", preview: str = "") -> str:
+    """Determine the trust level of a sender.
+
+    Checks in priority order:
+    1. Exact email address against allowlisted/known/suspicious senders
+    2. Domain against allowlisted/known/suspicious domains
+    3. Subject and preview against suspicious keywords
+    4. Default to 'unknown' for anything unmatched
+
+    Args:
+        from_address: Sanitized sender email address (e.g. "user@example.com").
+        subject: Sanitized email subject line.
+        preview: Sanitized email preview/snippet.
+
+    Returns:
+        One of: "allowlisted", "known", "unknown", "suspicious"
+    """
+    config = load_trust_config()
+    if not config:
+        return "unknown"
+
+    trust_levels = config.get("trust_levels", {})
+    defaults = config.get("defaults", {})
+    default_level = defaults.get("unmatched_sender", "unknown")
+
+    from_lower = from_address.lower().strip()
+
+    # Extract domain from address
+    domain = ""
+    if "@" in from_lower:
+        domain = from_lower.rsplit("@", 1)[-1]
+
+    subject_lower = subject.lower()
+    preview_lower = preview.lower()
+
+    # Check each trust level in priority order
+    # Priority: allowlisted > suspicious > known (order matters for overrides)
+    # allowlisted takes highest priority — explicit trust wins
+    for level in ("allowlisted", "suspicious", "known"):
+        level_config = trust_levels.get(level, {})
+        if not level_config:
+            continue
+
+        senders = [s.lower() for s in level_config.get("senders", [])]
+        domains = [d.lower() for d in level_config.get("domains", [])]
+        keywords = [k.lower() for k in level_config.get("keywords", [])]
+
+        # Check exact address match
+        if from_lower in senders:
+            return level
+
+        # Check domain match
+        if domain and domain in domains:
+            return level
+
+        # Check suspicious keywords (only applies to "suspicious" level)
+        if level == "suspicious" and keywords:
+            for kw in keywords:
+                if kw in subject_lower or kw in preview_lower:
+                    return level
+
+    return default_level
 # ===========================================================================
 # Zero-width and control characters that have no legitimate place in
 # notification text. Kept as an explicit allowlist complement (we strip these
@@ -553,6 +688,38 @@ def classify_email(event: dict) -> dict:
     else:
         cls, action, emoji = "personal", "reply", "🔵"
 
+    # Sender trust level — loaded from trust_config.yaml
+    from_lower = from_.lower()
+    domain = from_lower.rsplit("@", 1)[-1] if "@" in from_lower else ""
+    trust_level = get_sender_trust_level(from_, subject, preview)
+
+    # Trust-level overrides: suspicious → quarantine, unknown → notify_only
+    quarantine_reason = ""
+    if trust_level == "suspicious":
+        action = "quarantine"
+        # Determine quarantine reason for the notification
+        config = load_trust_config()
+        suspicious_config = config.get("trust_levels", {}).get("suspicious", {})
+        suspicious_senders = [s.lower() for s in suspicious_config.get("senders", [])]
+        suspicious_domains = [d.lower() for d in suspicious_config.get("domains", [])]
+        suspicious_keywords = [k.lower() for k in suspicious_config.get("keywords", [])]
+        quarantine_reason = "sender/domain/keyword match"
+        if from_lower in suspicious_senders:
+            quarantine_reason = "sender match"
+        elif domain and domain in suspicious_domains:
+            quarantine_reason = "domain match"
+        elif any(kw in subject_lower or kw in preview_lower for kw in suspicious_keywords):
+            quarantine_reason = "keyword match"
+    elif trust_level == "unknown":
+        action = "notify_only"
+
+    trust_emoji = _TRUST_EMOJI.get(trust_level, "⚪")
+
+    # Log trust decision if configured
+    config = load_trust_config()
+    if config.get("defaults", {}).get("log_trust_decisions", True):
+        print(f"TRUST: sender={from_[:50]} trust_level={trust_level} action={action}")
+
     sender_name = from_.split("<")[0].strip() if "<" in from_ else from_
     # TRUST BOUNDARY: subject and sender_name are sanitized email content
     # being embedded into a Telegram message. Escape for Telegram formatting.
@@ -565,6 +732,9 @@ def classify_email(event: dict) -> dict:
         "classification": cls,
         "action": action,
         "emoji": emoji,
+        "trust_level": trust_level,
+        "trust_emoji": trust_emoji,
+        "quarantine_reason": quarantine_reason,
         # These fields contain SANITIZED email content — downstream consumers
         # must still escape for their specific output format.
         "from_": from_,
@@ -692,13 +862,36 @@ def cleanup_expired_actions() -> int:
 # ---------------------------------------------------------------------------
 # Notification format
 # ---------------------------------------------------------------------------
-def format_notification(c: dict) -> tuple[str, dict]:
+def format_notification(c: dict) -> tuple[str, dict | None]:
     """Format a Telegram notification message and inline keyboard.
 
     TRUST BOUNDARY: All email-derived fields in `c` are pre-sanitized
     by classify_email(). They are additionally escaped for Telegram
     Markdown formatting here to prevent injection of formatting commands.
+
+    Returns:
+        (text, keyboard) where keyboard may be None for suspicious emails
+        that get a plain-text alert with no action buttons.
     """
+    trust_level = c.get("trust_level", "unknown")
+    trust_emoji = c.get("trust_emoji", "⚪")
+
+    # --- Suspicious emails: plain-text alert, NO interactive buttons ---
+    if trust_level == "suspicious":
+        safe_from = escape_for_telegram(c["from_"])
+        safe_subject = escape_for_telegram(c["subject"])
+        lines = [
+            "⚠️ SUSPICIOUS EMAIL QUARANTINED",
+            f"From: {safe_from}",
+            f"Subject: {safe_subject}",
+        ]
+        # Determine reason for quarantine
+        reason = c.get("quarantine_reason", "sender/domain/keyword match")
+        lines.append(f"Reason: {reason}")
+        text = "\n".join(lines)
+        return text, None  # No keyboard for quarantined emails
+
+    # --- Normal notification format ---
     attach_str = " 📎" if c["has_attachments"] else ""
 
     lines = [
@@ -716,19 +909,32 @@ def format_notification(c: dict) -> tuple[str, dict]:
         lines.append(f"**Preview:** {preview}")
     lines.append(f"**Classified:** {c['classification']}")
 
+    # Add trust level line: 🟢 allowlisted / 🔵 known / ⚪ unknown / 🔴 suspicious
+    lines.append(f"**Trust:** {trust_emoji} {trust_level}")
+
     text = "\n".join(lines)
 
     # Store action data and use short keys for Telegram's 64-byte callback_data limit
     key = _store_action(c["thread_id"], c["message_id"])
 
-    # Inline keyboard with three action buttons (callback_data ≤ 64 bytes)
-    keyboard = {
-        "inline_keyboard": [[
-            {"text": "✅ Reply", "callback_data": f"am:reply:{key}"},
-            {"text": "🗑️ Ignore", "callback_data": f"am:ignore:{key}"},
-            {"text": "📝 Save to Vault", "callback_data": f"am:save:{key}"},
-        ]]
-    }
+    # Build inline keyboard based on trust level
+    if trust_level == "unknown":
+        # Unknown senders: no Reply button, only Ignore and Save to Vault
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "🗑️ Ignore", "callback_data": f"am:ignore:{key}"},
+                {"text": "📝 Save to Vault", "callback_data": f"am:save:{key}"},
+            ]]
+        }
+    else:
+        # Allowlisted/known: full three-button layout
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "✅ Reply", "callback_data": f"am:reply:{key}"},
+                {"text": "🗑️ Ignore", "callback_data": f"am:ignore:{key}"},
+                {"text": "📝 Save to Vault", "callback_data": f"am:save:{key}"},
+            ]]
+        }
 
     return text, keyboard
 
@@ -837,7 +1043,7 @@ def main():
     success = send_telegram(notification, reply_markup=keyboard)
 
     if success:
-        print(f"NOTIFIED: {classified['classification']} email from {classified['sender_name']} — {classified['subject'][:50]}")
+        print(f"NOTIFIED: {classified['classification']} email from {classified['sender_name']} — {classified['subject'][:50]} [trust: {classified.get('trust_level', 'unknown')}]")
     else:
         print(f"FAILED to notify: {classified['subject'][:50]}", file=sys.stderr)
 

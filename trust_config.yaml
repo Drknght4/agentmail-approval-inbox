@@ -1,0 +1,31 @@
+# Sender Trust Configuration
+# Controls how agentmail_processor.py handles emails by sender trust level
+
+trust_levels:
+
+  allowlisted:
+    description: "Fully trusted senders — richer automation permitted"
+    senders: []        # exact addresses: user@example.com
+    domains: []        # entire domains: example.com
+    action_override: null
+
+  known:
+    description: "Known contacts — standard processing"
+    senders: []
+    domains: []
+    action_override: null
+
+  unknown:
+    description: "Unknown internet senders — notification only, no Reply automation"
+    action_override: "notify_only"
+
+  suspicious:
+    description: "Suspicious senders — quarantine immediately"
+    senders: []
+    domains: []
+    keywords: []
+    action_override: "quarantine"
+
+defaults:
+  unmatched_sender: "unknown"
+  log_trust_decisions: true
