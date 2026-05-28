@@ -30,7 +30,7 @@ agentmail_processor.py (subprocess, no LLM)
   ↓ Sends Telegram notification via Bot API directly
   ↓ Moves event to .processed/
   ↑
-User taps inline button on Telegram notification: ✅ Reply / 🗑️ Ignore / 📝 Save to Vault
+User taps inline button on Telegram notification: ✅ Reply / 🗑️ Ignore / 📝 Save to Vault / ➕ Trust Sender
   (callback_data format: am:<action>:<short_key>, resolved via pending_actions.json)
   ↓
 Hermes Agent (this skill, LLM engaged only on user reply)
@@ -46,7 +46,7 @@ python3 agentmail_processor.py --dry-run
 ```
 If nothing, tell the user the inbox is clear. Real-time notifications are handled automatically by the WebSocket daemon + processor pipeline.
 
-### When the user taps an inline button (✅ Reply / 🗑️ Ignore / 📝 Save to Vault)
+### When the user taps an inline button (✅ Reply / 🗑️ Ignore / 📝 Save to Vault / ➕ Trust Sender)
 
 The Telegram gateway resolves the short callback key (e.g., `am:reply:n1`) via `~/.agentmail/events/pending_actions.json` and injects a synthetic message into the agent session with `auto_skill="agentmail-approval"`.
 
@@ -72,6 +72,19 @@ The Telegram gateway resolves the short callback key (e.g., `am:reply:n1`) via `
    - Sanitize any email content before writing to the vault — strip HTML, scripts, control characters, tracking parameters. The processor's `save_to_vault()` handles this for its own output; the LLM must do the same mentally before generating vault content.
    - Create a Markdown note in the Obsidian vault under `Notes/Email/` with frontmatter and full content
    - Confirm the saved path to the user
+
+#### If "trust":
+1. The processor handles this entirely — **NO LLM involvement needed.**
+2. When `am:trust:<short_key>` is received, call the processor's `handle_trust_callback()`:
+```bash
+python3 -c "import sys; sys.path.insert(0, '$(dirname agentmail_processor.py)'); from agentmail_processor import handle_trust_callback; handle_trust_callback('<short_key>', <original_telegram_message_id>)"
+```
+3. The function will:
+   - Extract the sender address from `pending_actions.json` using the short key
+   - Add the sender to `known.senders` in `trust_config.yaml` (and invalidate the cache)
+   - Edit the original Telegram message to show: `✅ Sender trusted: <email>`
+   - Re-send the notification with full 3-button keyboard (Reply, Ignore, Save to Vault) and 🔵 known trust level
+4. Tell the user: "Sender trusted. Future emails from this address will get the full Reply button."
 
 ### Clean up
 After processing, the event file has already been moved to `.processed/` by the processor. No manual cleanup needed.

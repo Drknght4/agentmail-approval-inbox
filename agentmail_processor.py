@@ -754,8 +754,8 @@ def classify_email(event: dict) -> dict:
 # Telegram Bot API — direct HTTP, no SDK
 # ---------------------------------------------------------------------------
 def send_telegram(text: str, chat_id: str = TELEGRAM_CHAT_ID,
-                  reply_markup: dict | None = None) -> bool:
-    """Send a message via Telegram Bot API. Returns True on success.
+                  reply_markup: dict | None = None) -> int | bool:
+    """Send a message via Telegram Bot API. Returns message_id on success, False on failure.
 
     TRUST BOUNDARY: The `text` parameter contains sanitized email content
     that has been escaped for Telegram Markdown. No raw email content
@@ -786,7 +786,7 @@ def send_telegram(text: str, chat_id: str = TELEGRAM_CHAT_ID,
             if result.get("ok"):
                 msg_id = result.get("result", {}).get("message_id")
                 print(f"Telegram sent: message_id={msg_id}")
-                return True
+                return msg_id if msg_id else True
             else:
                 print(f"Telegram API error: {result}", file=sys.stderr)
                 return False
@@ -818,13 +818,22 @@ def _save_pending(store: dict):
     PENDING_ACTIONS_FILE.write_text(json.dumps(store, indent=2))
 
 
-def _store_action(thread_id: str, message_id: str) -> str:
-    """Store thread_id/message_id and return a short key like 'n42'."""
+def _store_action(thread_id: str, message_id: str, from_address: str = "") -> str:
+    """Store thread_id/message_id/from_address and return a short key like 'n42'.
+
+    The from_address is stored so the 'trust' callback can retrieve it
+    to promote the sender to 'known' in trust_config.yaml.
+    """
     store = _load_pending()
     # Find next numeric key
     next_id = max((int(k[1:]) for k in store if k.startswith("n")), default=0) + 1
     key = f"n{next_id}"
-    store[key] = {"thread_id": thread_id, "message_id": message_id, "created_at": time.time()}
+    store[key] = {
+        "thread_id": thread_id,
+        "message_id": message_id,
+        "from_address": from_address,
+        "created_at": time.time(),
+    }
     _save_pending(store)
     return key
 
@@ -915,16 +924,21 @@ def format_notification(c: dict) -> tuple[str, dict | None]:
     text = "\n".join(lines)
 
     # Store action data and use short keys for Telegram's 64-byte callback_data limit
-    key = _store_action(c["thread_id"], c["message_id"])
+    key = _store_action(c["thread_id"], c["message_id"], from_address=c.get("from_", ""))
 
     # Build inline keyboard based on trust level
     if trust_level == "unknown":
-        # Unknown senders: no Reply button, only Ignore and Save to Vault
+        # Unknown senders: no Reply button; add Trust Sender on second row
         keyboard = {
-            "inline_keyboard": [[
-                {"text": "🗑️ Ignore", "callback_data": f"am:ignore:{key}"},
-                {"text": "📝 Save to Vault", "callback_data": f"am:save:{key}"},
-            ]]
+            "inline_keyboard": [
+                [
+                    {"text": "🗑️ Ignore", "callback_data": f"am:ignore:{key}"},
+                    {"text": "📝 Save to Vault", "callback_data": f"am:save:{key}"},
+                ],
+                [
+                    {"text": "➕ Trust Sender", "callback_data": f"am:trust:{key}"},
+                ],
+            ]
         }
     else:
         # Allowlisted/known: full three-button layout
@@ -933,6 +947,9 @@ def format_notification(c: dict) -> tuple[str, dict | None]:
                 {"text": "✅ Reply", "callback_data": f"am:reply:{key}"},
                 {"text": "🗑️ Ignore", "callback_data": f"am:ignore:{key}"},
                 {"text": "📝 Save to Vault", "callback_data": f"am:save:{key}"},
+            ],
+            [
+                {"text": "➕ Trust Sender", "callback_data": f"am:trust:{key}"},
             ]]
         }
 
@@ -1001,6 +1018,204 @@ tags: [email, {c['classification']}]
 
 
 # ---------------------------------------------------------------------------
+# Telegram message editing — update original notification after trust action
+# ---------------------------------------------------------------------------
+def edit_telegram_message(message_id: int, text: str,
+                          chat_id: str = TELEGRAM_CHAT_ID,
+                          reply_markup: dict | None = None) -> bool:
+    """Edit an existing Telegram message. Returns True on success.
+
+    Used after 'Trust Sender' to update the original notification with
+    the new trust level and full button set.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        print("ERROR: TELEGRAM_BOT_TOKEN not set", file=sys.stderr)
+        return False
+
+    url = f"{TELEGRAM_API}/editMessageText"
+    payload_dict = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    }
+    if reply_markup:
+        payload_dict["reply_markup"] = reply_markup
+
+    payload = json.dumps(payload_dict).encode("utf-8")
+
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            if result.get("ok"):
+                print(f"Telegram edited: message_id={message_id}")
+                return True
+            else:
+                print(f"Telegram edit error: {result}", file=sys.stderr)
+                return False
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"Telegram edit HTTP error {e.code}: {body}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"Telegram edit error: {e}", file=sys.stderr)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Trust config mutation — add sender to known.senders
+# ---------------------------------------------------------------------------
+def add_sender_to_known(sender_address: str) -> bool:
+    """Add a sender address to the known.senders list in trust_config.yaml.
+
+    Invalidates the trust config cache so the next lookup reflects the change.
+    Returns True on success, False on failure.
+
+    SECURITY: sender_address must be pre-sanitized before calling this function.
+    """
+    global _trust_config_cache
+
+    config_path = Path(TRUST_CONFIG_PATH)
+
+    if not config_path.exists():
+        print(f"TRUST_CONFIG: cannot add sender — config file not found at {config_path}", file=sys.stderr)
+        return False
+
+    if _YAML_AVAILABLE:
+        import yaml as _yaml
+
+        try:
+            raw = config_path.read_text(encoding="utf-8")
+            config = _yaml.safe_load(raw) or {}
+        except Exception as e:
+            print(f"TRUST_CONFIG: failed to read for update: {e}", file=sys.stderr)
+            return False
+
+        # Ensure structure exists
+        if "trust_levels" not in config:
+            config["trust_levels"] = {}
+        if "known" not in config["trust_levels"]:
+            config["trust_levels"]["known"] = {
+                "description": "Known contacts — standard processing",
+                "senders": [],
+                "domains": [],
+                "action_override": None,
+            }
+        if "senders" not in config["trust_levels"]["known"]:
+            config["trust_levels"]["known"]["senders"] = []
+
+        # Add if not already present (case-insensitive check)
+        known_senders = config["trust_levels"]["known"]["senders"]
+        sender_lower = sender_address.lower()
+        if not any(s.lower() == sender_lower for s in known_senders):
+            known_senders.append(sender_address)
+            print(f"TRUST_CONFIG: added {sender_address} to known.senders")
+        else:
+            print(f"TRUST_CONFIG: {sender_address} already in known.senders")
+
+        # Write back preserving YAML format and comments
+        try:
+            output = _yaml.dump(config, default_flow_style=False, allow_unicode=True,
+                                sort_keys=False)
+            config_path.write_text(output, encoding="utf-8")
+        except Exception as e:
+            print(f"TRUST_CONFIG: failed to write updated config: {e}", file=sys.stderr)
+            return False
+    else:
+        print("TRUST_CONFIG: yaml package required to update trust_config.yaml", file=sys.stderr)
+        return False
+
+    # Invalidate cache so next lookup reflects the change
+    _trust_config_cache = None
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Trust callback handler — one-tap sender promotion with re-notification
+# ---------------------------------------------------------------------------
+def handle_trust_callback(short_key: str, original_message_id: int | None = None) -> bool:
+    """Handle the 'am:trust:<short_key>' callback.
+
+    Flow:
+    1. Extract sender address from pending_actions.json using the short key
+    2. Add sender to known.senders in trust_config.yaml
+    3. Re-send notification for the email with full 3-button keyboard and 🔵 known trust
+    4. Edit original Telegram message to show: ✅ Sender trusted: <email>
+
+    Args:
+        short_key: The short key (e.g. 'n42') from the callback_data.
+        original_message_id: The Telegram message_id of the notification to edit.
+
+    Returns:
+        True if the trust promotion and re-notification succeeded.
+    """
+    store = _load_pending()
+    entry = store.get(short_key)
+
+    if not entry or not isinstance(entry, dict):
+        print(f"TRUST_CALLBACK: short key '{short_key}' not found in pending_actions", file=sys.stderr)
+        return False
+
+    sender_address = entry.get("from_address", "")
+    if not sender_address:
+        print(f"TRUST_CALLBACK: no from_address stored for key '{short_key}'", file=sys.stderr)
+        return False
+
+    # Sanitize sender address (defensive — should already be sanitized)
+    safe_sender = sanitize_email_content(sender_address, field_name="trust_sender")
+
+    # Step 1: Add sender to known.senders
+    if not add_sender_to_known(safe_sender):
+        print(f"TRUST_CALLBACK: failed to add {safe_sender} to known.senders", file=sys.stderr)
+        return False
+
+    print(f"TRUST_CALLBACK: promoted {safe_sender} to known")
+
+    # Step 2: Edit original message to show trust confirmation
+    if original_message_id:
+        safe_sender_display = escape_for_telegram(safe_sender)
+        edit_text = f"✅ Sender trusted: {safe_sender_display}"
+        edit_telegram_message(original_message_id, edit_text)
+
+    # Step 3: Re-send the notification with updated trust level and full buttons
+    # Build a re-classified dict with the sender now as "known"
+    thread_id = entry.get("thread_id", "")
+    message_id = entry.get("message_id", "")
+    re_classified = {
+        "classification": "personal",  # Known sender defaults to personal
+        "action": "reply",
+        "emoji": "🔵",
+        "trust_level": "known",
+        "trust_emoji": "🔵",
+        "quarantine_reason": "",
+        "from_": safe_sender,
+        "sender_name": safe_sender.split("@")[0] if "@" in safe_sender else safe_sender,
+        "subject": "(re-notification — sender trusted)",
+        "preview": f"Sender {safe_sender} has been added to known contacts.",
+        "has_attachments": False,
+        "thread_id": thread_id,
+        "message_id": message_id,
+        "inbox_id": "",
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "summary": f"✉️ **Re-notification** — Sender {escape_for_telegram(safe_sender)} is now trusted",
+    }
+
+    notification, keyboard = format_notification(re_classified)
+    new_msg_id = send_telegram(notification, reply_markup=keyboard)
+
+    if new_msg_id and new_msg_id is not False:
+        print(f"TRUST_CALLBACK: re-sent notification for {safe_sender} (new msg_id={new_msg_id})")
+        return True
+    else:
+        print(f"TRUST_CALLBACK: failed to re-send notification for {safe_sender}", file=sys.stderr)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -1040,10 +1255,10 @@ def main():
     # Format and send Telegram notification with inline buttons
     # format_notification() applies format-specific escaping for Telegram Markdown.
     notification, keyboard = format_notification(classified)
-    success = send_telegram(notification, reply_markup=keyboard)
+    tg_msg_id = send_telegram(notification, reply_markup=keyboard)
 
-    if success:
-        print(f"NOTIFIED: {classified['classification']} email from {classified['sender_name']} — {classified['subject'][:50]} [trust: {classified.get('trust_level', 'unknown')}]")
+    if tg_msg_id and tg_msg_id is not False:
+        print(f"NOTIFIED: {classified['classification']} email from {classified['sender_name']} — {classified['subject'][:50]} [trust: {classified.get('trust_level', 'unknown')}] (msg_id={tg_msg_id})")
     else:
         print(f"FAILED to notify: {classified['subject'][:50]}", file=sys.stderr)
 
