@@ -114,8 +114,18 @@ class ReaderAgent:
         received_at = str(event.get("receivedAt", "") or event.get("received_at", "") or "")
         has_attachments = bool(event.get("hasAttachments", False) or event.get("has_attachments", False))
 
-        # Sanitize all text fields
-        from_address = sanitize_email_content(from_raw, field_name="from")
+        # EMAIL EXTRACTION: "Name <email@domain.com>" → extract email before sanitization.
+        # The sanitizer strips <...> as HTML tags, so we must parse the email first.
+        import re as _re
+        _email_match = _re.search(r'<([^>]+@[^>]+)>', from_raw)
+        if _email_match:
+            from_address = _email_match.group(1).strip()
+            # Keep display name separately for sender_name if not already set
+            if not sender_name_raw:
+                sender_name_raw = from_raw.split('<')[0].strip()
+        else:
+            # No angle-bracket format — sanitize the raw value as-is
+            from_address = sanitize_email_content(from_raw, field_name="from")
         sender_name = sanitize_email_content(sender_name_raw, field_name="sender_name")
         subject = sanitize_email_content(subject_raw, field_name="subject")
         preview = sanitize_email_content(preview_raw, field_name="preview")
