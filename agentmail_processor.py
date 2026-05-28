@@ -18,10 +18,8 @@ Environment:
   OBSIDIAN_VAULT      — default: ~/obsidian-vault
 """
 
-import html
 import json
 import os
-import re
 import sys
 import time
 import urllib.request
@@ -37,6 +35,14 @@ except ImportError:
 
 from intent_schema import EmailIntent
 from policy_engine import PolicyEngine, PolicyDecision
+from reader_agent import ReaderAgent, ReaderOutput
+from sanitizer import (
+    sanitize_email_content,
+    escape_for_telegram,
+    escape_for_json,
+    escape_for_filename,
+    escape_for_markdown_yaml,
+)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -69,6 +75,9 @@ POLICY_CONFIG_PATH = Path(os.environ.get(
 
 # Initialize policy engine at module level — fail-closed if config missing
 _policy_engine = PolicyEngine(config_path=POLICY_CONFIG_PATH)
+
+# Initialize reader agent at module level — tool-less, sanitize-only
+_reader = ReaderAgent()
 
 
 # ===========================================================================
@@ -196,196 +205,11 @@ def get_sender_trust_level(from_address: str, subject: str = "", preview: str = 
                     return level
 
     return default_level
-# ===========================================================================
-# Zero-width and control characters that have no legitimate place in
-# notification text. Kept as an explicit allowlist complement (we strip these
-# rather than trying to enumerate every possible bad character).
-_CONTROL_CHAR_RE = re.compile(
-    "[\u0000-\u0008\u000b\u000c\u000e-\u001f"  # C0 controls except TAB/LF/CR
-    "\u007f"                                      # DEL
-    "\u00ad"                                      # SOFT HYPHEN
-    "\u200b-\u200f"                               # zero-width space, joiner, etc.
-    "\u2028-\u202f"                               # line/para sep, directional controls
-    "\u2060-\u206f"                               # word joiner, invisible operators
-    "\ufeff"                                      # BOM / zero-width no-break space
-    "\ufff9-\ufffb"                               # interlinear annotation
-    "]"
-)
-
-# HTML/script elements — stripped ENTIRELY including their content.
-# These elements carry no meaningful visible text; their content is
-# executable/styling code that must be removed, not preserved.
-# We use explicit patterns for each tag to avoid backreference complexity.
-_HTML_SCRIPT_RE = re.compile(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL)
-_HTML_STYLE_RE = re.compile(r"<\s*style\b[^>]*>.*?<\s*/\s*style\s*>", re.IGNORECASE | re.DOTALL)
-_HTML_IFRAME_RE = re.compile(r"<\s*iframe\b[^>]*>.*?<\s*/\s*iframe\s*>", re.IGNORECASE | re.DOTALL)
-_HTML_OBJECT_RE = re.compile(r"<\s*object\b[^>]*>.*?<\s*/\s*object\s*>", re.IGNORECASE | re.DOTALL)
-_HTML_EMBED_RE = re.compile(r"<\s*embed\b[^>]*>.*?<\s*/\s*embed\s*>", re.IGNORECASE | re.DOTALL)
-_HTML_APPLET_RE = re.compile(r"<\s*applet\b[^>]*>.*?<\s*/\s*applet\s*>", re.IGNORECASE | re.DOTALL)
-_HTML_FORM_RE = re.compile(r"<\s*form\b[^>]*>.*?<\s*/\s*form\s*>", re.IGNORECASE | re.DOTALL)
-_HTML_HEAD_RE = re.compile(r"<\s*head\b[^>]*>.*?<\s*/\s*head\s*>", re.IGNORECASE | re.DOTALL)
-
-# Self-closing or void dangerous tags — stripped (tag only, no content)
-_HTML_VOID_TAG_RE = re.compile(
-    r"<\s*/?\s*(?:input|textarea|button|link|meta|base|img|br|hr)\b[^>]*/?\s*>",
-    re.IGNORECASE | re.DOTALL,
-)
-
-# Remaining HTML tags — convert to content-preserving plaintext
-_HTML_GENERAL_RE = re.compile(r"<[^>]+>")
-
-# Markdown links [text](url) — keep visible text only
-_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
-
-# Markdown images ![alt](url) — drop entirely (no legitimate use in email fields)
-_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-
-# Common tracking parameters to strip from any surviving URLs
-_TRACKING_PARAMS = re.compile(r"[?&](?:utm_[a-z]+|fbclid|gclid|mc_eid|mc_cid|yclid|_openstat|pk_campaign|pk_source|pk_medium|pk_content)=([^&]*)", re.IGNORECASE)
-
-# Whitespace normalization — collapse runs of whitespace to single space
-_WHITESPACE_RE = re.compile(r"\s+")
-
-
-def _strip_html_and_scripts(text: str) -> str:
-    """Remove dangerous HTML elements and their content entirely (script,
-    style, iframe, etc.), then strip all remaining HTML tags, preserving
-    inner text where meaningful.
-
-    This is a two-pass approach:
-    1. Remove entire elements with their content (script, style, iframe, ...)
-    2. Remove void/dangerous tags (input, meta, link, ...)
-    3. Strip all remaining HTML tags, preserving inner text
-    """
-    # Pass 1: Remove entire elements with their content
-    for pattern in (_HTML_SCRIPT_RE, _HTML_STYLE_RE, _HTML_IFRAME_RE,
-                    _HTML_OBJECT_RE, _HTML_EMBED_RE, _HTML_APPLET_RE,
-                    _HTML_FORM_RE, _HTML_HEAD_RE):
-        text = pattern.sub("", text)
-    # Pass 2: Remove void/dangerous tags
-    text = _HTML_VOID_TAG_RE.sub("", text)
-    # Pass 3: Strip remaining HTML tags, preserving inner text
-    text = _HTML_GENERAL_RE.sub("", text)
-    return text
-
-
-def _strip_control_chars(text: str) -> str:
-    """Remove invisible/control characters that could be used for injection."""
-    return _CONTROL_CHAR_RE.sub("", text)
-
-
-def _strip_markdown_links(text: str) -> str:
-    """Convert [text](url) to just 'text'. Remove ![alt](url) entirely."""
-    text = _MD_IMAGE_RE.sub("", text)
-    text = _MD_LINK_RE.sub(r"\1", text)
-    return text
-
-
-def _strip_tracking_params(text: str) -> str:
-    """Remove common tracking parameters from any URLs in the text."""
-    # Repeated to handle adjacent params
-    prev = None
-    while prev != text:
-        prev = text
-        text = _TRACKING_PARAMS.sub("", text)
-    return text
-
-
-def _normalize_whitespace(text: str) -> str:
-    """Collapse all whitespace runs to single spaces, strip edges."""
-    return _WHITESPACE_RE.sub(" ", text).strip()
-
-
-def sanitize_email_content(text: str, field_name: str = "") -> str:
-    """Sanitize untrusted email content for safe output.
-
-    Pipeline: strip HTML/scripts → strip control chars → strip markdown
-    links → strip tracking params → normalize whitespace.
-
-    FAILS CLOSED: raises ValueError if the result is empty after sanitization
-    of a field that should contain data, indicating the input was purely
-    malicious/empty content.
-
-    Args:
-        text: Raw email-derived string (subject, preview, sender, etc.)
-        field_name: Optional field name for error messages.
-
-    Returns:
-        Sanitized plaintext safe for Telegram, Obsidian, and LLM context.
-    """
-    if not isinstance(text, str):
-        raise ValueError(f"sanitize_email_content: {field_name or 'input'} must be str, got {type(text).__name__}")
-
-    if not text:
-        return ""
-
-    result = _strip_html_and_scripts(text)
-    result = _strip_control_chars(result)
-    result = _strip_markdown_links(result)
-    result = _strip_tracking_params(result)
-    result = _normalize_whitespace(result)
-
-    return result
-
 
 # ===========================================================================
-# OUTPUT ESCAPING — format-specific escaping for safe rendering
+# SANITIZATION AND ESCAPING — now imported from sanitizer.py
+# See sanitizer.py for the full implementation.
 # ===========================================================================
-
-def escape_for_telegram(text: str) -> str:
-    """Escape text for Telegram MarkdownV1 parse_mode.
-
-    Telegram MarkdownV1 treats these characters as special: * _ ` [ ].
-    We escape them to prevent injection of formatting from untrusted content.
-    """
-    # Escape backslash first, then Telegram Markdown special chars
-    text = text.replace("\\", "\\\\")
-    for ch in ("*", "_", "`", "["):
-        text = text.replace(ch, "\\" + ch)
-    return text
-
-
-def escape_for_json(text: str) -> str:
-    """Escape text for safe JSON string embedding.
-
-    This is NOT json.dumps() — it escapes for embedding inside an already-
-    serialized JSON string value, preventing premature quote/escape injection.
-    """
-    text = text.replace("\\", "\\\\")
-    text = text.replace('"', '\\"')
-    text = text.replace("\n", "\\n")
-    text = text.replace("\r", "\\r")
-    text = text.replace("\t", "\\t")
-    return text
-
-
-def escape_for_markdown_yaml(text: str) -> str:
-    """Escape text for safe embedding in Markdown/YAML frontmatter.
-
-    Handles quotes, colons in values, and special YAML characters.
-    """
-    # Escape double quotes for YAML string values
-    text = text.replace('"', '\\"')
-    # Collapse newlines (YAML doesn't tolerate unescaped newlines in quoted scalars)
-    text = text.replace("\n", " ").replace("\r", " ")
-    return text
-
-
-def escape_for_filename(text: str) -> str:
-    """Allowlist-based filename character escaping.
-
-    Only allows alphanumeric, spaces, hyphens, underscores, and dots
-    (for file extensions). Everything else becomes underscore. This is
-    an ALLOWLIST approach — we specify what's safe, not what's dangerous.
-
-    Additionally collapses '..' to '_' to prevent path traversal.
-    """
-    result = "".join(ch if ch.isalnum() or ch in " -_." else "_" for ch in text).strip()
-    # Collapse '..' to prevent path traversal (e.g., '../../../etc/passwd')
-    while ".." in result:
-        result = result.replace("..", "_")
-    return result
-
 
 # ===========================================================================
 # SECURE PROMPT BUILDER — wraps untrusted content for LLM context
@@ -632,22 +456,26 @@ def _quarantine_log(
 def classify_email(event: dict) -> dict:
     """Classify an email and produce metadata for notification.
 
-    TRUST BOUNDARY: All email-derived fields (from_, subject, preview)
-    are sanitized before being used in classification logic or returned
-    for downstream consumption.
+    READER/EXECUTOR SPLIT: Raw email event data enters through the ReaderAgent,
+    which sanitizes all fields and returns a ReaderOutput. All downstream
+    classification logic operates on ReaderOutput fields only — raw email
+    content never crosses the executor boundary.
     """
-    # --- TRUST BOUNDARY: email content enters system here ---
-    # Sanitize ALL email-derived fields at the boundary.
-    # These values crossed from untrusted (email) to trusted (our system).
-    raw_from = event.get("from_", "Unknown")
-    raw_subject = event.get("subject", "(no subject)")
-    raw_preview = event.get("preview", "")
-    has_attachments = event.get("has_attachments", False)
+    # ── READER BOUNDARY ──────────────────────────────────────────────────
+    # The ReaderAgent is tool-less. It reads the raw event, sanitizes all
+    # fields, and returns a ReaderOutput. No raw unsanitized content
+    # crosses this point. Email content NEVER flows directly to the
+    # executor — always through ReaderOutput.
+    # ──────────────────────────────────────────────────────────────────────
+    reader_output: ReaderOutput = _reader.read(event)
 
-    from_ = sanitize_email_content(str(raw_from), field_name="from_")
-    subject = sanitize_email_content(str(raw_subject), field_name="subject")
-    preview = sanitize_email_content(str(raw_preview), field_name="preview")
-    # --- END TRUST BOUNDARY ---
+    # EXECUTOR BOUNDARY: only ReaderOutput fields cross this line.
+    # Below this point, no access to the raw event dict is permitted.
+    # All text fields are guaranteed sanitized by the ReaderAgent.
+    from_ = reader_output.from_address
+    subject = reader_output.subject
+    preview = reader_output.preview
+    has_attachments = reader_output.has_attachments
 
     subject_lower = subject.lower()
     preview_lower = preview.lower()
@@ -808,17 +636,18 @@ def classify_email(event: dict) -> dict:
         "quarantine_reason": quarantine_reason,
         "intent": intent.to_dict() if intent else {},
         "policy_decision": policy_decision.to_dict() if policy_decision else {},
-        # These fields contain SANITIZED email content — downstream consumers
-        # must still escape for their specific output format.
+        # These fields contain SANITIZED content from ReaderOutput — downstream
+        # consumers must still escape for their specific output format.
         "from_": from_,
         "sender_name": sender_name,
         "subject": subject,
         "preview": preview[:200],
         "has_attachments": has_attachments,
-        "thread_id": event.get("thread_id", ""),
-        "message_id": event.get("message_id", ""),
-        "inbox_id": event.get("inbox_id", ""),
-        "received_at": event.get("received_at", ""),
+        "thread_id": reader_output.thread_id,
+        "message_id": reader_output.message_id,
+        "inbox_id": reader_output.inbox_id,
+        "received_at": reader_output.received_at,
+        "reader_output": reader_output,
         "summary": summary,
     }
 
@@ -1320,9 +1149,10 @@ def main():
         event_path.rename(dest)
         sys.exit(0)
 
-    # --- TRUST BOUNDARY: raw email event data enters our system here ---
-    # classify_email() applies sanitize_email_content() to all email-derived
-    # fields before they touch any downstream processing or output.
+    # ── READER/EXECUTOR SPLIT ─────────────────────────────────────────────
+    # Raw email event data enters through the ReaderAgent (tool-less, sanitize-only).
+    # classify_email() calls _reader.read() internally, which returns a ReaderOutput
+    # with all fields sanitized. No raw email content reaches downstream processing.
     classified = classify_email(event)
 
     # ── Policy gate ──────────────────────────────────────────────────────────
