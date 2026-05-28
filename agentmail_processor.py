@@ -36,6 +36,7 @@ except ImportError:
 from intent_schema import EmailIntent
 from policy_engine import PolicyEngine, PolicyDecision
 from reader_agent import ReaderAgent, ReaderOutput
+from context_quarantine import ContextQuarantine, TaintedContext, TaintViolationError
 from sanitizer import (
     sanitize_email_content,
     escape_for_telegram,
@@ -78,6 +79,12 @@ _policy_engine = PolicyEngine(config_path=POLICY_CONFIG_PATH)
 
 # Initialize reader agent at module level — tool-less, sanitize-only
 _reader = ReaderAgent()
+
+# Initialize context quarantine at module level — taint tracking
+# QUARANTINE BOUNDARY: all email-derived content is registered here
+# and tracked as tainted. It can be summarized for logging but MUST
+# NEVER persist to memory or directly trigger tool calls.
+_quarantine = ContextQuarantine()
 
 
 # ===========================================================================
@@ -477,6 +484,36 @@ def classify_email(event: dict) -> dict:
     preview = reader_output.preview
     has_attachments = reader_output.has_attachments
 
+    # ── QUARANTINE BOUNDARY ──────────────────────────────────────────────
+    # Register all email-derived content as tainted in the context quarantine.
+    # Tainted content can be summarized for logging but MUST NEVER persist
+    # to memory or directly trigger tool calls.
+    # ──────────────────────────────────────────────────────────────────────
+    quarantine_ids = []
+    try:
+        q_subject = _quarantine.register(
+            content=subject, source="email_subject",
+            thread_id=reader_output.thread_id, taint_level="medium",
+        )
+        quarantine_ids.append(q_subject.quarantine_id)
+
+        q_preview = _quarantine.register(
+            content=preview, source="email_preview",
+            thread_id=reader_output.thread_id, taint_level="high",
+        )
+        quarantine_ids.append(q_preview.quarantine_id)
+
+        q_sender = _quarantine.register(
+            content=from_, source="email_sender",
+            thread_id=reader_output.thread_id, taint_level="low",
+        )
+        quarantine_ids.append(q_sender.quarantine_id)
+    except Exception as e:
+        # Quarantine registration is best-effort — don't block processing
+        print(f"QUARANTINE_WARNING: failed to register tainted content: {e}", file=sys.stderr)
+
+    print(f"QUARANTINE: registered {len(quarantine_ids)} tainted contexts for thread {reader_output.thread_id}")
+
     subject_lower = subject.lower()
     preview_lower = preview.lower()
     from_lower = from_.lower()
@@ -648,6 +685,7 @@ def classify_email(event: dict) -> dict:
         "inbox_id": reader_output.inbox_id,
         "received_at": reader_output.received_at,
         "reader_output": reader_output,
+        "quarantine_ids": quarantine_ids,
         "summary": summary,
     }
 
@@ -1185,6 +1223,12 @@ def main():
             print(f"PROCESSED: {event_path.name} → {dest.name}")
         except Exception as e:
             print(f"ERROR moving to processed: {e}", file=sys.stderr)
+
+        # QUARANTINE BOUNDARY: flush tainted contexts for policy-blocked thread
+        blocked_thread = classified.get("thread_id", "")
+        if blocked_thread:
+            _quarantine.flush(blocked_thread)
+
         return
 
     # Format and send Telegram notification with inline buttons
@@ -1216,6 +1260,15 @@ def main():
         print(f"PROCESSED: {event_path.name} → {dest.name}")
     except Exception as e:
         print(f"ERROR moving to processed: {e}", file=sys.stderr)
+
+    # ── QUARANTINE BOUNDARY: flush tainted contexts for this thread ──
+    # After processing is complete, all tainted content for this thread
+    # is cleared from memory. It MUST NOT persist beyond this point.
+    thread_id = classified.get("thread_id", "")
+    if thread_id:
+        flushed = _quarantine.flush(thread_id)
+        if flushed:
+            print(f"QUARANTINE: flushed {flushed} tainted context(s) for thread {thread_id}")
 
 if __name__ == "__main__":
     main()

@@ -196,7 +196,26 @@ Each event is a JSON file in `~/.agentmail/events/`:
 }
 ```
 
-## Pitfalls
+### Context Quarantine
+
+All email-derived fields are **tainted** on ingestion. Tainted content is tracked by the `ContextQuarantine` throughout the pipeline with these guarantees:
+
+- **`can_persist()` always returns `False`** — tainted content never persists to memory or long-term storage
+- **`can_influence_tools()` always returns `False`** — tainted content never directly triggers tool calls or automation
+- **`TaintViolationError`** is raised if tainted content attempts to cross a quarantine boundary (e.g. memory writes, tool triggers)
+- Each piece of tainted content gets a unique `quarantine_id` (e.g. `q_e75ef36b2d99`) for audit tracing
+- Taint levels: `low` (sender), `medium` (subject), `high` (preview)
+- All quarantine operations are logged to `~/.agentmail/audit/quarantine.jsonl`
+- **Flushed after processing** — `_quarantine.flush(thread_id)` clears all tainted contexts for a thread once processing is complete
+
+| Source | Taint Level | Rationale |
+|--------|------------|------------|
+| `email_sender` | low | Sender addresses are semi-public and low-risk |
+| `email_subject` | medium | Subjects can contain social engineering |
+| `email_preview` | high | Body previews are highest-risk for injection |
+| `attachment` | high | Attachments are never processed inline |
+
+### Pitfalls
 - **Don't auto-reply without user confirmation.** This is an approval inbox — always wait for the user's go-ahead.
 - **Always CC the inbox owner on outgoing emails** — this is a standing directive.
 - **MANDATORY: Always include the agent signature on EVERY outgoing email** — both `html` and `text` must contain the signature block.
