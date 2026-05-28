@@ -1,0 +1,32 @@
+policy:
+  default_action: block
+  log_all_decisions: true
+  audit_log_path: ~/.agentmail/audit/policy_decisions.jsonl
+
+  rules:
+    suspicious:
+      allow: []
+      block: ["reply", "save", "trust"]
+      reason: "Suspicious sender — all actions blocked"
+
+    unknown:
+      allow: ["ignore", "save"]
+      block: ["reply"]
+      reason: "Unknown sender — reply blocked until trusted"
+      require_confirmation: []
+
+    known:
+      allow: ["reply", "save", "ignore", "trust"]
+      block: []
+      require_confirmation: ["high_risk"]
+      reason: ""
+
+    allowlisted:
+      allow: ["reply", "save", "ignore", "trust"]
+      block: []
+      require_confirmation: []
+      reason: ""
+
+audit:
+  retention_days: 90
+  max_entries: 10000

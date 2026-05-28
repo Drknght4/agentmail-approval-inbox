@@ -35,6 +35,9 @@ try:
 except ImportError:
     _YAML_AVAILABLE = False
 
+from intent_schema import EmailIntent
+from policy_engine import PolicyEngine, PolicyDecision
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -57,6 +60,15 @@ TRUST_CONFIG_PATH = Path(os.environ.get(
     "AGENTMAIL_TRUST_CONFIG",
     str(Path(__file__).resolve().parent / "trust_config.yaml"),
 ))
+
+# Policy config path — lives next to this script by default
+POLICY_CONFIG_PATH = Path(os.environ.get(
+    "AGENTMAIL_POLICY_CONFIG",
+    str(Path(__file__).resolve().parent / "policy_config.yaml"),
+))
+
+# Initialize policy engine at module level — fail-closed if config missing
+_policy_engine = PolicyEngine(config_path=POLICY_CONFIG_PATH)
 
 
 # ===========================================================================
@@ -720,6 +732,65 @@ def classify_email(event: dict) -> dict:
     if config.get("defaults", {}).get("log_trust_decisions", True):
         print(f"TRUST: sender={from_[:50]} trust_level={trust_level} action={action}")
 
+    # ── Policy Engine: build preliminary intent and validate ──
+    # Map the classified action to intent action semantics
+    # classify_email uses: reply, save, ignore, trust, notify_only, quarantine
+    # EmailIntent accepts: reply, save, ignore, trust, block
+    action_map = {
+        "reply": "reply",
+        "save": "save",
+        "ignore": "ignore",
+        "trust": "trust",
+        "notify_only": "ignore",  # notify_only → treat as ignore for policy
+        "quarantine": "block",      # quarantine → treat as block for policy
+    }
+    intent_action = action_map.get(action, "ignore")
+    requires_external_send = (action == "reply")
+    # Risk heuristic: approval + high-priority subjects → high, spam/quarantine → high, else low
+    risk_level = "low"
+    if trust_level == "suspicious" or action == "quarantine":
+        risk_level = "high"
+    elif cls in ("spam",) or is_approval:
+        risk_level = "medium"
+
+    intent = None
+    policy_decision = PolicyDecision(
+        approved=True,  # default: fail-open
+        reason="Policy validation not yet run",
+        required_confirmation=False,
+        audit_log_entry={},
+    )
+    try:
+        intent = EmailIntent(
+            action=intent_action,
+            to=from_ if action == "reply" else "",
+            subject=subject,
+            summary=f"Classified as {cls}, action={action}, trust={trust_level}",
+            risk_level=risk_level,
+            requires_external_send=requires_external_send,
+            sender_trust_level=trust_level,
+            raw_intent={
+                "classification": cls,
+                "original_action": action,
+                "from_": from_,
+                "subject": subject[:100],
+            },
+        )
+        policy_decision = _policy_engine.validate(intent, trust_level=trust_level)
+        print(f"POLICY: action={intent_action} trust={trust_level} "
+              f"approved={policy_decision.approved} "
+              f"confirm={policy_decision.required_confirmation} "
+              f"reason={policy_decision.reason}")
+    except (ValueError, Exception) as e:
+        # If intent construction or validation fails, fail-open with a warning
+        print(f"POLICY_ERROR: {e}", file=sys.stderr)
+        policy_decision = PolicyDecision(
+            approved=True,  # fail-open — let the notification through
+            reason=f"Policy validation error: {e}",
+            required_confirmation=False,
+            audit_log_entry={"error": str(e)},
+        )
+
     sender_name = from_.split("<")[0].strip() if "<" in from_ else from_
     # TRUST BOUNDARY: subject and sender_name are sanitized email content
     # being embedded into a Telegram message. Escape for Telegram formatting.
@@ -735,6 +806,8 @@ def classify_email(event: dict) -> dict:
         "trust_level": trust_level,
         "trust_emoji": trust_emoji,
         "quarantine_reason": quarantine_reason,
+        "intent": intent.to_dict() if intent else {},
+        "policy_decision": policy_decision.to_dict() if policy_decision else {},
         # These fields contain SANITIZED email content — downstream consumers
         # must still escape for their specific output format.
         "from_": from_,
@@ -1252,9 +1325,52 @@ def main():
     # fields before they touch any downstream processing or output.
     classified = classify_email(event)
 
+    # ── Policy gate ──────────────────────────────────────────────────────────
+    # Check the policy decision from classify_email(). If the action is blocked,
+    # send a policy-blocked alert with no interactive buttons. If confirmation
+    # is required, add a ⚠️ Confirm button row to the notification.
+    policy_decision = classified.get("policy_decision", {})
+    policy_approved = policy_decision.get("approved", True)
+    policy_confirm = policy_decision.get("required_confirmation", False)
+    policy_reason = policy_decision.get("reason", "")
+
+    if not policy_approved:
+        # ── Policy BLOCKED: send plain alert, no buttons ──
+        safe_from = escape_for_telegram(classified.get("from_", "Unknown"))
+        safe_subject = escape_for_telegram(classified.get("subject", "(no subject)"))
+        blocked_text = (
+            f"🚫 Action blocked by policy\n"
+            f"From: {safe_from}\n"
+            f"Subject: {safe_subject}\n"
+            f"Reason: {escape_for_telegram(policy_reason)}"
+        )
+        send_telegram(blocked_text)
+        print(f"POLICY_BLOCKED: {classified.get('subject', '')[:50]} — {policy_reason}")
+
+        # Move to processed
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        dest = PROCESSED_DIR / event_path.name
+        try:
+            event_path.rename(dest)
+            print(f"PROCESSED: {event_path.name} → {dest.name}")
+        except Exception as e:
+            print(f"ERROR moving to processed: {e}", file=sys.stderr)
+        return
+
     # Format and send Telegram notification with inline buttons
     # format_notification() applies format-specific escaping for Telegram Markdown.
     notification, keyboard = format_notification(classified)
+
+    # If policy requires confirmation, add a ⚠️ Confirm button row
+    if policy_confirm and keyboard is not None:
+        existing_rows = keyboard.get("inline_keyboard", [])
+        confirm_key = _store_action(
+            classified["thread_id"], classified["message_id"],
+            from_address=classified.get("from_", ""),
+        )
+        confirm_row = [{"text": "⚠️ Confirm", "callback_data": f"am:confirm:{confirm_key}"}]
+        keyboard["inline_keyboard"] = existing_rows + [confirm_row]
+
     tg_msg_id = send_telegram(notification, reply_markup=keyboard)
 
     if tg_msg_id and tg_msg_id is not False:
