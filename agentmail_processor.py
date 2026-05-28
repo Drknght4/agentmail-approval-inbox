@@ -18,6 +18,7 @@ Environment:
   OBSIDIAN_VAULT      — default: ~/obsidian-vault
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -72,6 +73,12 @@ TRUST_CONFIG_PATH = Path(os.environ.get(
 POLICY_CONFIG_PATH = Path(os.environ.get(
     "AGENTMAIL_POLICY_CONFIG",
     str(Path(__file__).resolve().parent / "policy_config.yaml"),
+))
+
+# Replay attempt audit log — logs any callback reuse or hash mismatch
+REPLAY_LOG = Path(os.environ.get(
+    "AGENTMAIL_REPLAY_LOG",
+    str(Path.home() / ".agentmail" / "audit" / "replay_attempts.jsonl"),
 ))
 
 # Initialize policy engine at module level — fail-closed if config missing
@@ -763,29 +770,128 @@ def _store_action(thread_id: str, message_id: str, from_address: str = "") -> st
 
     The from_address is stored so the 'trust' callback can retrieve it
     to promote the sender to 'known' in trust_config.yaml.
+
+    A request_hash is computed from thread_id + message_id + from_address + timestamp
+    to bind the callback to a specific request and detect replay or tampering.
     """
     store = _load_pending()
     # Find next numeric key
     next_id = max((int(k[1:]) for k in store if k.startswith("n")), default=0) + 1
     key = f"n{next_id}"
+    created_at = time.time()
+    # Request hash: binds this callback to the specific thread/message/sender/time
+    request_hash = _compute_request_hash(thread_id, message_id, from_address, created_at)
     store[key] = {
         "thread_id": thread_id,
         "message_id": message_id,
         "from_address": from_address,
-        "created_at": time.time(),
+        "created_at": created_at,
+        "request_hash": request_hash,
     }
     _save_pending(store)
     return key
+
+
+def _compute_request_hash(thread_id: str, message_id: str, from_address: str,
+                          timestamp: float) -> str:
+    """Compute a SHA-256 hash binding the callback to a specific request.
+
+    This hash is verified on callback resolution to detect tampering or
+    replay attacks where an attacker might swap thread_ids or message_ids.
+    """
+    raw = f"{thread_id}|{message_id}|{from_address}|{timestamp}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _log_replay_attempt(key: str, thread_id: str, reason: str) -> None:
+    """Log a replay attempt (consumed key or hash mismatch) to the audit log.
+
+    Args:
+        key: The short key that was attempted.
+        thread_id: The thread_id from the stored entry (or "" if not found).
+        reason: Why the attempt was rejected (e.g. "consumed", "hash_mismatch").
+    """
+    REPLAY_LOG.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": time.time(),
+        "key": key,
+        "thread_id": thread_id,
+        "reason": reason,
+    }
+    try:
+        with open(REPLAY_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        # Replay logging is best-effort — never block processing
+        print(f"REPLAY_LOG_ERROR: {e}", file=sys.stderr)
+    print(f"REPLAY_ATTEMPT: key={key} thread={thread_id} reason={reason}")
+
+
+def _consume_action(key: str, verify_thread_id: str = "",
+                    verify_message_id: str = "",
+                    verify_from_address: str = "") -> dict | None:
+    """Resolve a one-time-use callback, marking it as consumed.
+
+    Returns the stored action data if the key is valid and not yet consumed.
+    Returns None if:
+      - The key doesn't exist
+      - The key has already been consumed (replay attempt)
+      - The request_hash doesn't match (tampering detected)
+
+    On successful resolution, the key is marked with "consumed": True and
+    "consumed_at": <timestamp>. Any replay attempt is logged to the replay
+    audit log and silently ignored.
+    """
+    store = _load_pending()
+    entry = store.get(key)
+
+    if not entry or not isinstance(entry, dict):
+        _log_replay_attempt(key, "", "key_not_found")
+        return None
+
+    thread_id = entry.get("thread_id", "")
+
+    # Check if already consumed
+    if entry.get("consumed"):
+        _log_replay_attempt(key, thread_id, "consumed")
+        return None
+
+    # Verify request hash if verification fields are provided
+    stored_hash = entry.get("request_hash", "")
+    if stored_hash:
+        created_at = entry.get("created_at", 0)
+        expected_hash = _compute_request_hash(
+            verify_thread_id or entry.get("thread_id", ""),
+            verify_message_id or entry.get("message_id", ""),
+            verify_from_address or entry.get("from_address", ""),
+            created_at,
+        )
+        if stored_hash != expected_hash:
+            _log_replay_attempt(key, thread_id, f"hash_mismatch: expected={stored_hash} got={expected_hash}")
+            return None
+
+    # Mark as consumed
+    entry["consumed"] = True
+    entry["consumed_at"] = time.time()
+    store[key] = entry
+    _save_pending(store)
+
+    return entry
 
 
 # ---------------------------------------------------------------------------
 # Callback TTL — expire stale entries older than 48 hours
 # ---------------------------------------------------------------------------
 CALLBACK_TTL_SECONDS = 48 * 60 * 60  # 48 hours
+CONSUMED_TTL_SECONDS = 1 * 60 * 60   # 1 hour for consumed keys
 
 
 def cleanup_expired_actions() -> int:
-    """Remove pending action entries older than CALLBACK_TTL_SECONDS.
+    """Remove pending action entries older than CALLBACK_TTL_SECONDS,
+    and consumed entries older than CONSUMED_TTL_SECONDS.
+
+    Consumed keys don't need 48-hour retention since they're already
+    resolved — they only stay for a short audit window (1 hour).
 
     Returns the number of entries removed.
     """
@@ -794,10 +900,24 @@ def cleanup_expired_actions() -> int:
         return 0
 
     now = time.time()
-    expired_keys = [
-        k for k, v in store.items()
-        if isinstance(v, dict) and (now - v.get("created_at", now)) > CALLBACK_TTL_SECONDS
-    ]
+    expired_keys = []
+
+    for k, v in store.items():
+        if not isinstance(v, dict):
+            continue
+
+        created_at = v.get("created_at", now)
+
+        # Consumed entries: remove after CONSUMED_TTL_SECONDS (1 hour)
+        if v.get("consumed"):
+            consumed_at = v.get("consumed_at", created_at)
+            if (now - consumed_at) > CONSUMED_TTL_SECONDS:
+                expired_keys.append(k)
+                continue
+
+        # Non-consumed entries: remove after CALLBACK_TTL_SECONDS (48 hours)
+        if (now - created_at) > CALLBACK_TTL_SECONDS:
+            expired_keys.append(k)
 
     for k in expired_keys:
         del store[k]
@@ -1080,8 +1200,11 @@ def add_sender_to_known(sender_address: str) -> bool:
 def handle_trust_callback(short_key: str, original_message_id: int | None = None) -> bool:
     """Handle the 'am:trust:<short_key>' callback.
 
+    One-time-use: the short key is consumed on resolution. Any replay
+    attempt is logged to ~/.agentmail/audit/replay_attempts.jsonl.
+
     Flow:
-    1. Extract sender address from pending_actions.json using the short key
+    1. Consume the short key (one-time-use, marks as consumed)
     2. Add sender to known.senders in trust_config.yaml
     3. Re-send notification for the email with full 3-button keyboard and 🔵 known trust
     4. Edit original Telegram message to show: ✅ Sender trusted: <email>
@@ -1093,11 +1216,12 @@ def handle_trust_callback(short_key: str, original_message_id: int | None = None
     Returns:
         True if the trust promotion and re-notification succeeded.
     """
-    store = _load_pending()
-    entry = store.get(short_key)
+    # One-time-use: consume the key and verify hash
+    entry = _consume_action(short_key)
 
-    if not entry or not isinstance(entry, dict):
-        print(f"TRUST_CALLBACK: short key '{short_key}' not found in pending_actions", file=sys.stderr)
+    if entry is None:
+        # Key not found, already consumed, or hash mismatch — logged by _consume_action
+        print(f"TRUST_CALLBACK: short key '{short_key}' rejected (not found, consumed, or hash mismatch)", file=sys.stderr)
         return False
 
     sender_address = entry.get("from_address", "")

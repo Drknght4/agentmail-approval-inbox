@@ -36,6 +36,10 @@ agentmail_processor.py (subprocess, no LLM)
   ↑
 User taps inline button on Telegram notification: ✅ Reply / 🗑️ Ignore / 📝 Save to Vault / ➕ Trust Sender
   (callback_data format: am:<action>:<short_key>, resolved via pending_actions.json)
+  ↑ One-time-use: each short key can only be resolved once. Consumed keys are
+    marked and logged. Replay attempts are written to replay_attempts.jsonl.
+  ↑ Hash-bound: each callback includes a request_hash computed from thread_id +
+    message_id + from_address + timestamp, verified on resolution.
   ↓
 Hermes Agent (this skill, LLM engaged only on user reply)
   ↓ Uses AgentMail MCP tools to act
@@ -150,12 +154,14 @@ If `approved=False`, the processor sends a 🚫 policy-blocked alert instead of 
 
 #### If "trust":
 1. The processor handles this entirely — **NO LLM involvement needed.**
-2. When `am:trust:<short_key>` is received, call the processor's `handle_trust_callback()`:
+2. When `am:trust:<short_key>` is received, call the processor's `handle_trust_callback()`.
+   **Note: callbacks are one-time-use.** The short key is consumed on resolution — any replay attempt is logged to `~/.agentmail/audit/replay_attempts.jsonl` and silently rejected. Each callback is also hash-bound to `thread_id + message_id + from_address + timestamp`.
 ```bash
 python3 -c "import sys; sys.path.insert(0, '$(dirname agentmail_processor.py)'); from agentmail_processor import handle_trust_callback; handle_trust_callback('<short_key>', <original_telegram_message_id>)"
 ```
 3. The function will:
-   - Extract the sender address from `pending_actions.json` using the short key
+   - Consume the short key (one-time-use, marks as consumed)
+   - Verify the request hash matches (tamper detection)
    - Add the sender to `known.senders` in `trust_config.yaml` (and invalidate the cache)
    - Edit the original Telegram message to show: `✅ Sender trusted: <email>`
    - Re-send the notification with full 3-button keyboard (Reply, Ignore, Save to Vault) and 🔵 known trust level
