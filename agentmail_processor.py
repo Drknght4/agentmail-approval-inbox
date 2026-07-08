@@ -1002,15 +1002,13 @@ def format_notification(c: dict) -> tuple[str, dict | None]:
             ]
         }
     else:
-        # Allowlisted/known: full three-button layout
+        # Allowlisted/known: full three-button layout, no Trust Sender
+        # (sender is already trusted — button would be redundant)
         keyboard = {
             "inline_keyboard": [[
                 {"text": "✅ Reply", "callback_data": f"am:reply:{key}"},
                 {"text": "🗑️ Ignore", "callback_data": f"am:ignore:{key}"},
                 {"text": "📝 Save to Vault", "callback_data": f"am:save:{key}"},
-            ],
-            [
-                {"text": "➕ Trust Sender", "callback_data": f"am:trust:{key}"},
             ]]
         }
 
