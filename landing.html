@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentMail Approval Inbox — Real-Time Email Approval via Telegram</title>
+<meta name="description" content="A real-time email approval system that classifies incoming emails, sends Telegram notifications with interactive buttons, and only engages an LLM when you take action. Zero AI tokens spent on notifications.">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ────────────────────────────────────────────────────────────
+   LINEAR DESIGN SYSTEM — exact tokens from popular-web-designs
+   ──────────────────────────────────────────────────────────── */
+:root {
+  --bg-marketing: #08090a;
+  --bg-panel: #0f1011;
+  --bg-elevated: #191a1b;
+  --bg-hover: #28282c;
+
+  --text-primary: #f7f8f8;
+  --text-secondary: #d0d6e0;
+  --text-tertiary: #8a8f98;
+  --text-quaternary: #62666d;
+
+  --brand: #5e6ad2;
+  --brand-accent: #7170ff;
+  --brand-hover: #828fff;
+
+  --success: #27a644;
+  --success-bright: #10b981;
+
+  --border-subtle: rgba(255,255,255,0.05);
+  --border-standard: rgba(255,255,255,0.08);
+  --border-solid: #23252a;
+
+  --radius-sm: 6px;
+  --radius-card: 8px;
+  --radius-panel: 12px;
+  --radius-pill: 9999px;
+
+  --max-width: 1200px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-feature-settings: "cv01", "ss03";
+  background: var(--bg-marketing);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection { background: rgba(94,106,210,0.3); color: var(--text-primary); }
+
+/* ── NAV ──────────────────────────────────────────────────── */
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(8,9,10,0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.nav-inner {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+}
+.nav-brand-icon {
+  width: 22px; height: 22px;
+  border-radius: 5px;
+  background: var(--brand);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.nav-brand-icon svg { width: 14px; height: 14px; }
+.nav-brand-text {
+  font-size: 15px;
+  font-weight: 510;
+  letter-spacing: -0.165px;
+  color: var(--text-primary);
+}
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+.nav-links a {
+  font-size: 13px;
+  font-weight: 510;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.15s;
+  letter-spacing: -0.13px;
+}
+.nav-links a:hover { color: var(--text-primary); }
+.nav-cta {
+  font-size: 13px;
+  font-weight: 510;
+  color: #fff;
+  background: var(--brand);
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  transition: background 0.15s;
+  letter-spacing: -0.13px;
+}
+.nav-cta:hover { background: var(--brand-hover); }
+
+/* ── HERO ────────────────────────────────────────────────── */
+.hero {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 120px 24px 80px;
+  text-align: center;
+}
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-solid);
+  background: rgba(255,255,255,0.02);
+  font-size: 12px;
+  font-weight: 510;
+  color: var(--text-secondary);
+  margin-bottom: 28px;
+}
+.hero-badge-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--success-bright);
+}
+.hero h1 {
+  font-size: 56px;
+  font-weight: 510;
+  line-height: 1.05;
+  letter-spacing: -1.3px;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+  max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.hero p {
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  max-width: 560px;
+  margin: 0 auto 36px;
+}
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+.btn-primary {
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 510;
+  color: #fff;
+  background: var(--brand);
+  border: none;
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-primary:hover { background: var(--brand-hover); }
+.btn-ghost {
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 510;
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border-standard);
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-ghost:hover { background: rgba(255,255,255,0.05); }
+
+/* ── HERO MOCKUP ─────────────────────────────────────────── */
+.hero-mockup {
+  max-width: 680px;
+  margin: 48px auto 0;
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--border-standard);
+  background: var(--bg-panel);
+  overflow: hidden;
+  text-align: left;
+}
+.mockup-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mockup-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+}
+.mockup-dot.r { background: #ff5f57; }
+.mockup-dot.y { background: #febc2e; }
+.mockup-dot.g { background: #28c840; }
+.mockup-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-quaternary);
+  margin-left: 8px;
+}
+.mockup-body {
+  padding: 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.mockup-line { display: flex; gap: 12px; }
+.mockup-label { color: var(--text-quaternary); min-width: 80px; }
+.mockup-value { color: var(--text-secondary); }
+.mockup-classified {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.cls-approval { background: rgba(251,113,133,0.15); color: #fb7185; }
+.cls-trust { background: rgba(16,185,129,0.15); color: var(--success-bright); }
+.mockup-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+.mockup-btn {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 510;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-standard);
+  background: rgba(255,255,255,0.03);
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+/* ── SECTION ─────────────────────────────────────────────── */
+section {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 80px 24px;
+}
+.section-label {
+  font-size: 13px;
+  font-weight: 510;
+  color: var(--brand-accent);
+  margin-bottom: 12px;
+  letter-spacing: -0.13px;
+}
+.section-title {
+  font-size: 36px;
+  font-weight: 510;
+  line-height: 1.1;
+  letter-spacing: -0.792px;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.section-desc {
+  font-size: 17px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
+  max-width: 580px;
+  margin-bottom: 48px;
+}
+
+/* ── PIPELINE ────────────────────────────────────────────── */
+.pipeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.pipeline-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.pipeline-step:last-child { border-bottom: none; }
+.pipeline-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-quaternary);
+  min-width: 28px;
+  padding-top: 2px;
+}
+.pipeline-content { flex: 1; }
+.pipeline-name {
+  font-size: 16px;
+  font-weight: 590;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  letter-spacing: -0.24px;
+}
+.pipeline-desc {
+  font-size: 14px;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+}
+.pipeline-tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-quaternary);
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.03);
+  margin-top: 6px;
+}
+
+/* ── FEATURES ───────────────────────────────────────────── */
+.feature-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--border-subtle);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+}
+.feature {
+  background: var(--bg-panel);
+  padding: 32px;
+}
+.feature:hover { background: var(--bg-elevated); }
+.feature-icon {
+  width: 32px; height: 32px;
+  border-radius: var(--radius-sm);
+  background: rgba(94,106,210,0.1);
+  display: flex; align-items: center; justify-content: center;
+  margin-bottom: 16px;
+}
+.feature-icon svg { width: 16px; height: 16px; stroke: var(--brand-accent); fill: none; stroke-width: 2; }
+.feature h3 {
+  font-size: 17px;
+  font-weight: 590;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  letter-spacing: -0.24px;
+}
+.feature p {
+  font-size: 14px;
+  color: var(--text-tertiary);
+  line-height: 1.55;
+}
+
+/* ── SECURITY ────────────────────────────────────────────── */
+.security-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.security-layer {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--border-subtle);
+  background: rgba(255,255,255,0.02);
+}
+.security-layer-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--brand-accent);
+  min-width: 24px;
+}
+.security-layer-name {
+  font-size: 15px;
+  font-weight: 510;
+  color: var(--text-primary);
+  letter-spacing: -0.165px;
+}
+.security-layer-desc {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  margin-left: auto;
+  text-align: right;
+}
+
+/* ── TABLES ──────────────────────────────────────────────── */
+.table-wrap {
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+th {
+  text-align: left;
+  padding: 12px 16px;
+  font-size: 12px;
+  font-weight: 510;
+  color: var(--text-tertiary);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-subtle);
+  letter-spacing: -0.13px;
+}
+td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(255,255,255,0.01); }
+td code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--brand-accent);
+  background: rgba(94,106,210,0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* ── CODE BLOCK ─────────────────────────────────────────── */
+.code-block {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  padding: 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  overflow-x: auto;
+}
+.code-comment { color: var(--text-quaternary); }
+.code-keyword { color: var(--brand-accent); }
+.code-string { color: var(--success-bright); }
+
+/* ── CTA SECTION ─────────────────────────────────────────── */
+.cta-section {
+  text-align: center;
+  padding: 100px 24px;
+}
+.cta-section h2 {
+  font-size: 40px;
+  font-weight: 510;
+  letter-spacing: -0.88px;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.cta-section p {
+  font-size: 17px;
+  color: var(--text-tertiary);
+  margin-bottom: 32px;
+}
+
+/* ── FOOTER ──────────────────────────────────────────────── */
+footer {
+  border-top: 1px solid var(--border-subtle);
+  padding: 40px 24px;
+  text-align: center;
+}
+footer p {
+  font-size: 13px;
+  color: var(--text-quaternary);
+  letter-spacing: -0.13px;
+}
+footer a {
+  color: var(--text-tertiary);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+footer a:hover { color: var(--text-primary); }
+
+/* ── PROGRESSIVE ENHANCEMENT REVEAL ──────────────────────── */
+.reveal { opacity: 1; transform: none; }
+html.js-reveal .reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+html.js-reveal .reveal.active {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── RESPONSIVE ─────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .nav-links a:not(.nav-cta) { display: none; }
+  .hero { padding: 80px 20px 60px; }
+  .hero h1 { font-size: 36px; letter-spacing: -0.792px; }
+  .hero p { font-size: 16px; }
+  .hero-actions { flex-direction: column; }
+  .hero-mockup { margin-top: 32px; }
+  section { padding: 60px 20px; }
+  .section-title { font-size: 28px; letter-spacing: -0.616px; }
+  .feature-grid { grid-template-columns: 1fr; }
+  .pipeline-step { flex-direction: column; gap: 4px; }
+  .pipeline-num { padding-top: 0; }
+  .security-layer { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .security-layer-desc { margin-left: 0; text-align: left; }
+  table { font-size: 13px; }
+  th, td { padding: 10px 12px; }
+  .cta-section h2 { font-size: 28px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.js-reveal .reveal { transition: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── NAV ────────────────────────────────────────────────── -->
+<nav>
+  <div class="nav-inner">
+    <a href="#" class="nav-brand">
+      <div class="nav-brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5">
+        <path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/>
+        </svg>
+      </div>
+      <span class="nav-brand-text">AgentMail Approval Inbox</span>
+    </a>
+    <div class="nav-links">
+      <a href="#how-it-works">How it works</a>
+      <a href="#security">Security</a>
+      <a href="#classification">Classification</a>
+      <a href="#quickstart">Quick start</a>
+      <a href="https://github.com/Drknght4/agentmail-approval-inbox" class="nav-cta" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ── HERO ───────────────────────────────────────────────── -->
+<div class="hero reveal">
+  <div class="hero-badge">
+    <span class="hero-badge-dot"></span>
+    MIT Licensed · Open Source
+  </div>
+  <h1>Email approvals without the AI tax.</h1>
+  <p>A real-time email approval system that classifies incoming emails, sends Telegram notifications with interactive buttons, and only engages an LLM when you take action — zero tokens spent on notifications.</p>
+  <div class="hero-actions">
+    <a href="https://github.com/Drknght4/agentmail-approval-inbox" class="btn-primary" target="_blank" rel="noopener">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.692-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      View on GitHub
+    </a>
+    <a href="#quickstart" class="btn-ghost">Quick start guide</a>
+  </div>
+
+  <!-- Telegram notification mockup -->
+  <div class="hero-mockup">
+    <div class="mockup-header">
+      <span class="mockup-dot r"></span>
+      <span class="mockup-dot y"></span>
+      <span class="mockup-dot g"></span>
+      <span class="mockup-title">Telegram notification</span>
+    </div>
+    <div class="mockup-body">
+      <div class="mockup-line"><span class="mockup-label">From</span><span class="mockup-value">Finance Team</span></div>
+      <div class="mockup-line"><span class="mockup-label">Subject</span><span class="mockup-value">Q3 Budget Review 📎</span></div>
+      <div class="mockup-line"><span class="mockup-label">Preview</span><span class="mockup-value">Please review the attached spreadsheet and approve...</span></div>
+      <div class="mockup-line"><span class="mockup-label">Classified</span><span class="mockup-value"><span class="mockup-classified cls-approval">approval</span></span></div>
+      <div class="mockup-line"><span class="mockup-label">Trust</span><span class="mockup-value"><span class="mockup-classified cls-trust">known</span></span></div>
+      <div class="mockup-buttons">
+        <span class="mockup-btn">✅ Reply</span>
+        <span class="mockup-btn">🗑️ Ignore</span>
+        <span class="mockup-btn">📝 Save</span>
+        <span class="mockup-btn">➕ Trust</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── HOW IT WORKS ──────────────────────────────────────── -->
+<section id="how-it-works" class="reveal">
+  <div class="section-label">How it works</div>
+  <h2 class="section-title">From inbox to action in milliseconds.</h2>
+  <p class="section-desc">Every email flows through a deterministic pipeline — classification, notification, and security checks happen in pure Python. The LLM only wakes up when you tap a button.</p>
+
+  <div class="pipeline">
+    <div class="pipeline-step">
+      <div class="pipeline-num">01</div>
+      <div class="pipeline-content">
+        <div class="pipeline-name">AgentMail WebSocket</div>
+        <div class="pipeline-desc">Persistent connection to AgentMail Cloud. Push-based delivery — no polling, no delays. Subscribes to your inbox and writes each event as a JSON file.</div>
+        <span class="pipeline-tag">agentmail_ws.py · systemd service</span>
+      </div>
+    </div>
+    <div class="pipeline-step">
+      <div class="pipeline-num">02</div>
+      <div class="pipeline-content">
+        <div class="pipeline-name">ReaderAgent — Sanitization</div>
+        <div class="pipeline-desc">All email fields pass through sanitize_email_content() — strips HTML, scripts, control characters, tracking parameters. Returns a ReaderOutput dataclass. No raw content escapes.</div>
+        <span class="pipeline-tag">reader_agent.py · zero LLM</span>
+      </div>
+    </div>
+    <div class="pipeline-step">
+      <div class="pipeline-num">03</div>
+      <div class="pipeline-content">
+        <div class="pipeline-name">ContextQuarantine — Taint Tracking</div>
+        <div class="pipeline-desc">Registers all email fields with taint metadata. can_persist() = False, can_influence_tools() = False. Email content can never persist to memory or trigger tool execution.</div>
+        <span class="pipeline-tag">context_quarantine.py</span>
+      </div>
+    </div>
+    <div class="pipeline-step">
+      <div class="pipeline-num">04</div>
+      <div class="pipeline-content">
+        <div class="pipeline-name">PolicyEngine — Authorization</div>
+        <div class="pipeline-desc">Validates structured intent against trust levels. Suspicious → always block. Unknown → reply blocked. Known → all actions allowed. Allowlisted → log only.</div>
+        <span class="pipeline-tag">policy_engine.py · policy_config.yaml</span>
+      </div>
+    </div>
+    <div class="pipeline-step">
+      <div class="pipeline-num">05</div>
+      <div class="pipeline-content">
+        <div class="pipeline-name">Telegram Notification</div>
+        <div class="pipeline-desc">Builds the notification with inline buttons — Reply, Ignore, Save to Vault, Trust Sender. Short keys stored in pending_actions.json. One-time-use, SHA-256 hash-bound callbacks.</div>
+        <span class="pipeline-tag">agentmail_processor.py · Bot API</span>
+      </div>
+    </div>
+    <div class="pipeline-step">
+      <div class="pipeline-num">06</div>
+      <div class="pipeline-content">
+        <div class="pipeline-name">LLM Engagement — Only on Tap</div>
+        <div class="pipeline-desc">When you tap Reply or Save, Hermes Agent reads the thread via MCP and drafts a response or saves to Obsidian. Always CCs owner and includes signature. This is the only step that costs tokens.</div>
+        <span class="pipeline-tag">Hermes Agent · MCP tools</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FEATURES ───────────────────────────────────────────── -->
+<section class="reveal">
+  <div class="section-label">Why it's different</div>
+  <h2 class="section-title">Built for agents that respect your wallet.</h2>
+  <p class="section-desc">Every design decision optimizes for one thing: not spending tokens unless you explicitly ask it to.</p>
+
+  <div class="feature-grid">
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      </div>
+      <h3>Zero-cost notifications</h3>
+      <p>Classification runs on Python heuristics — keyword matching, sender analysis, attachment detection. No LLM call needed to decide whether an email is worth your attention.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      </div>
+      <h3>WebSocket push delivery</h3>
+      <p>Persistent connection to AgentMail Cloud means instant push notifications. No polling intervals, no missed emails, no delay between arrival and your Telegram chat.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 100 20 10 10 0 000-20z"/><path d="M12 8v4M12 16h.01"/></svg>
+      </div>
+      <h3>Human-in-the-loop, always</h3>
+      <p>No auto-replies. Ever. The LLM only engages when you tap a button. Every reply is drafted for your review before sending — you remain the final authority.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <h3>Five-layer security</h3>
+      <p>Sanitization, taint tracking, policy enforcement, one-time-use callbacks, and SHA-256 hash binding. Email content is treated as hostile until proven otherwise — and even then, contained.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── SECURITY ───────────────────────────────────────────── -->
+<section id="security" class="reveal">
+  <div class="section-label">Security architecture</div>
+  <h2 class="section-title">Five layers between email and your agent.</h2>
+  <p class="section-desc">Every email is treated as untrusted input. The pipeline applies defense at each boundary — from raw HTML to LLM context window.</p>
+
+  <div class="security-layers">
+    <div class="security-layer">
+      <div class="security-layer-num">01</div>
+      <div class="security-layer-name">ReaderAgent — Sanitization</div>
+      <div class="security-layer-desc">Tool-less, zero I/O. All fields sanitized before any system sees them.</div>
+    </div>
+    <div class="security-layer">
+      <div class="security-layer-num">02</div>
+      <div class="security-layer-name">ContextQuarantine — Taint Tracking</div>
+      <div class="security-layer-desc">Email content can never persist to memory or trigger tools.</div>
+    </div>
+    <div class="security-layer">
+      <div class="security-layer-num">03</div>
+      <div class="security-layer-name">PolicyEngine — Authorization</div>
+      <div class="security-layer-desc">Suspicious blocked, unknown restricted, high-risk requires confirmation.</div>
+    </div>
+    <div class="security-layer">
+      <div class="security-layer-num">04</div>
+      <div class="security-layer-name">One-time-use Callbacks</div>
+      <div class="security-layer-desc">Each button press consumes its key. Replay attempts are logged.</div>
+    </div>
+    <div class="security-layer">
+      <div class="security-layer-num">05</div>
+      <div class="security-layer-name">SHA-256 Request Hash Binding</div>
+      <div class="security-layer-desc">Callbacks bound to original context. Can't be replayed with different parameters.</div>
+    </div>
+  </div>
+
+  <div style="margin-top: 24px;">
+    <p style="font-size: 14px; color: var(--text-tertiary); line-height: 1.6;">
+      <strong style="color: var(--text-secondary); font-weight: 510;">89 unit tests</strong> cover injection scenarios, attachment safety, and output escaping. Full security documentation in
+      <a href="https://github.com/Drknght4/agentmail-approval-inbox/blob/main/SECURITY.md" target="_blank" rel="noopener" style="color: var(--brand-accent); text-decoration: none;">SECURITY.md</a>.
+    </p>
+  </div>
+</section>
+
+<!-- ── CLASSIFICATION ─────────────────────────────────────── -->
+<section id="classification" class="reveal">
+  <div class="section-label">Classification & Trust</div>
+  <h2 class="section-title">Every email gets a verdict before you see it.</h2>
+  <p class="section-desc">Pure-Python heuristics classify each email and assign a trust level to the sender. The system learns — Trust Sender promotes unknown senders with one tap.</p>
+
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 32px;">
+    <div>
+      <h3 style="font-size: 15px; font-weight: 590; color: var(--text-primary); margin-bottom: 16px; letter-spacing: -0.24px;">Classification</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Type</th><th>Signals</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            <tr><td style="color:#fb7185;">approval</td><td>request, pending, urgent, review, signature</td><td>Reply</td></tr>
+            <tr><td style="color:#60a5fa;">personal</td><td>Human sender, no spam signals</td><td>Reply</td></tr>
+            <tr><td style="color:#fbbf24;">transactional</td><td>Receipt, invoice, shipping, verification</td><td>Save</td></tr>
+            <tr><td style="color:var(--text-tertiary);">newsletter</td><td>noreply sender, unsubscribe, digest</td><td>Ignore</td></tr>
+            <tr><td style="color:#6b7280;">spam</td><td>Marketing keywords + newsletter signals</td><td>Ignore</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div>
+      <h3 style="font-size: 15px; font-weight: 590; color: var(--text-primary); margin-bottom: 16px; letter-spacing: -0.24px;">Sender Trust Levels</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Level</th><th>Buttons</th><th>Behavior</th></tr>
+          </thead>
+          <tbody>
+            <tr><td style="color:var(--success-bright);">allowlisted</td><td>All + Trust</td><td>All actions, log only</td></tr>
+            <tr><td style="color:#60a5fa;">known</td><td>All + Trust</td><td>All actions allowed</td></tr>
+            <tr><td style="color:var(--text-tertiary);">unknown</td><td>Ignore, Save, Trust</td><td>Reply blocked until trusted</td></tr>
+            <tr><td style="color:#fb7185;">suspicious</td><td>None</td><td>All actions blocked</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── QUICK START ────────────────────────────────────────── -->
+<section id="quickstart" class="reveal">
+  <div class="section-label">Quick start</div>
+  <h2 class="section-title">Running in under five minutes.</h2>
+  <p class="section-desc">Three steps: install, configure, run. Works with any free AgentMail account.</p>
+
+  <div style="display: flex; flex-direction: column; gap: 16px; margin-top: 32px;">
+    <div>
+      <h3 style="font-size: 15px; font-weight: 590; color: var(--text-primary); margin-bottom: 8px; letter-spacing: -0.24px;">1. Install dependencies</h3>
+      <div class="code-block">
+<span class="code-comment"># Python 3.11+ required</span>
+pip install agentmail websockets</div>
+    </div>
+    <div>
+      <h3 style="font-size: 15px; font-weight: 590; color: var(--text-primary); margin-bottom: 8px; letter-spacing: -0.24px;">2. Configure environment</h3>
+      <div class="code-block">
+<span class="code-comment"># Copy the example and fill in your credentials</span>
+cp .env.example .env
+
+<span class="code-keyword">AGENTMAIL_API_KEY</span>=am_us_your_key
+<span class="code-keyword">TELEGRAM_BOT_TOKEN</span>=your_bot_token
+<span class="code-keyword">TELEGRAM_CHAT_ID</span>=your_chat_id
+<span class="code-keyword">AGENTMAIL_INBOX_ID</span>=your-inbox@agentmail.to</div>
+    </div>
+    <div>
+      <h3 style="font-size: 15px; font-weight: 590; color: var(--text-primary); margin-bottom: 8px; letter-spacing: -0.24px;">3. Install as systemd service</h3>
+      <div class="code-block">
+<span class="code-comment"># Deploy as a persistent service</span>
+mkdir -p ~/.config/systemd/user
+cp agentmail-ws.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now agentmail-ws
+
+<span class="code-comment"># Send yourself a test email — watch Telegram light up</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── CTA ────────────────────────────────────────────────── -->
+<section class="cta-section reveal">
+  <h2>Stop paying for email you haven't read yet.</h2>
+  <p>Open source. MIT licensed. Built by Nova AI on AgentMail + Hermes Agent.</p>
+  <div style="display: flex; gap: 12px; justify-content: center;">
+    <a href="https://github.com/Drknght4/agentmail-approval-inbox" class="btn-primary" target="_blank" rel="noopener">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.692-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      Clone the repo
+    </a>
+    <a href="https://console.agentmail.to" class="btn-ghost" target="_blank" rel="noopener">Get AgentMail account</a>
+  </div>
+</section>
+
+<!-- ── FOOTER ────────────────────────────────────────────── -->
+<footer>
+  <p>
+    <a href="https://github.com/Drknght4/agentmail-approval-inbox" target="_blank" rel="noopener">AgentMail Approval Inbox</a>
+    · MIT License · Built by <a href="https://github.com/Drknght4" target="_blank" rel="noopener">Nova AI</a>
+    · Powered by <a href="https://agentmail.to" target="_blank" rel="noopener">AgentMail</a> +
+    <a href="https://hermes-agent.nousresearch.com" target="_blank" rel="noopener">Hermes Agent</a>
+  </p>
+</footer>
+
+<script>
+// Progressive enhancement — content visible by default, JS opts in to hiding for animation
+document.documentElement.classList.add('js-reveal');
+
+const reveals = document.querySelectorAll('.reveal');
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('active');
+      observer.unobserve(entry.target);
+    }
+  });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+reveals.forEach(el => observer.observe(el));
+
+// Safety net — if IO fails, force-reveal after 1.5s
+setTimeout(() => {
+  reveals.forEach(el => {
+    if (!el.classList.contains('active')) {
+      el.classList.add('active');
+    }
+  });
+}, 1500);
+</script>
+</body>
+</html>
